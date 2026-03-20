@@ -1,8 +1,7 @@
-#include "MergeShortEdge.h"
-
 #include <algorithm>
 #include <cmath>
 
+#include "MergeShortEdge.h"
 #include "GeometryUtils.h"
 #include "TopologyUtils.h"
 
@@ -10,7 +9,7 @@
 #include <TopExp.hxx>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846
+#define M_PI 3.14159265358979
 #endif
 
 MergeShortEdge::MergeShortEdge(double lengthThreshold, double angleThresholdDeg)
@@ -36,11 +35,8 @@ void MergeShortEdge::setInputShapes(const std::vector<TopoDS_Shape>& shapes)
 {
     inputShapes_ = shapes;
     // 过滤掉空形状
-    inputShapes_.erase(
-        std::remove_if(inputShapes_.begin(), inputShapes_.end(),
-            [](const TopoDS_Shape& s) { return s.IsNull(); }),
-        inputShapes_.end()
-    );
+    std::erase_if(inputShapes_, [](const TopoDS_Shape& s) {return s.IsNull(); });
+    
     // 重置结果
     shortEdges_.clear();
     mergeCandidates_.clear();

@@ -15,7 +15,7 @@ public:
 	/// <summary>
 	/// 获取顶点的度数
 	/// </summary>
-	/// <param name="vertex">:需要获取的度的顶点</param>
+	/// <param name="vertex">:需要获取度的顶点</param>
 	/// <param name="map">:先前构建的映射表</param>
 	/// <returns></returns>
 	static int GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map);

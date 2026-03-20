@@ -74,7 +74,7 @@ double GeometryUtils::ComputeIntersectionAngle(const TopoDS_Edge& e1, const Topo
         curve2 = Handle(Geom_Curve)::DownCast(curve2->Transformed(loc2.Transformation()));
     }
 
-    // 获取公共顶点的坐标
+    // 获取公共顶点的坐标（BRep_Tool::Pnt()直接返回全局坐标）
     gp_Pnt commonPoint = BRep_Tool::Pnt(commonV);
 
     // 计算在公共顶点处的参数值
@@ -122,7 +122,7 @@ double GeometryUtils::ComputeIntersectionAngle(const TopoDS_Edge& e1, const Topo
     gp_Vec tangent1, tangent2;
     
     try {
-        // 计算一阶导数（切向量）
+		// 计算一阶导数（切向量）,方向是参数值从小到大增长的方向
         gp_Pnt pointOnCurve1;
         curve1->D1(param1, pointOnCurve1, tangent1);
         
