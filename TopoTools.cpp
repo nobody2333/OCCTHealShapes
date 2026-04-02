@@ -448,6 +448,10 @@ DiscreteSurface* TopoTools::convertToDiscreteSurface(const TopoDS_Face& anOCC_To
         for (int i = 1; i <= numNodes; ++i)
         {
             gp_Pnt aGpPoint = aTriangulation->Node(i);
+            if (!aLocation.IsIdentity()) {
+                // 只有非恒等变换时才执行变换
+                aGpPoint.Transform(aLocation.Transformation());
+            }
             Point aPoint(aGpPoint.X(), aGpPoint.Y(), aGpPoint.Z());
             aPointVec.push_back(aPoint);
         }

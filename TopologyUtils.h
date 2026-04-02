@@ -1,8 +1,8 @@
 #pragma once
-#include<TopAbs_ShapeEnum.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS_Vertex.hxx>
-#include<TopTools_IndexedDataMapOfShapeListofShape.hxx>
-#include<TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopExp.hxx>
 
 class TopologyUtils {
 public:

@@ -26,18 +26,17 @@ struct MergeCandidate {
 
 /// <summary>
 /// 短边检测与合并类
-/// 使用 GeometryUtils 计算边长和夹角
-/// 使用 TopologyUtils 构建顶点到边的拓扑映射
+/// 可选参数包括包围盒对角线比例和两边夹角
+/// 长度阈值可指定具体值，也可以基于包围盒对角线的比例自动计算
 /// </summary>
 class MergeShortEdge {
 public:
     /// <summary>
     /// 默认构造函数
     /// </summary>
-    /// <param name="lengthThreshold">短边长度阈值（默认 0.5）</param>
+    /// <param name="bboxRatio">短边阈值相对于包围盒对角线的比例（默认 0.001，即千分之一）</param>
     /// <param name="angleThresholdDeg">共线角度阈值（默认 175 度）</param>
-    MergeShortEdge(double lengthThreshold = 0.5, double angleThresholdDeg = 175.0);
-    
+    MergeShortEdge(double bboxRatio = 0.001, double angleThresholdDeg = 175.0);
     ~MergeShortEdge() = default;
 
     // 禁止拷贝，允许移动
@@ -47,7 +46,7 @@ public:
     MergeShortEdge& operator=(MergeShortEdge&&) = default;
 
     /// <summary>
-    /// 设置输入形状（可以是 Solid、Shell、Face 或 Compound）
+    /// 设置输入形状
     /// </summary>
     /// <param name="shape">输入的 TopoDS_Shape</param>
     void setInputShape(const TopoDS_Shape& shape);
@@ -63,6 +62,14 @@ public:
     /// </summary>
     /// <param name="threshold">长度阈值</param>
     void setLengthThreshold(double threshold) { lengthThreshold_ = threshold; }
+
+    /// <summary>
+    /// 基于模型包围盒对角线设置长度阈值
+    /// 短边阈值 = 包围盒对角线长度 × ratio
+    /// </summary>
+    /// <param name="ratio">比例系数，默认0.001（千分之一）</param>
+    /// <returns>是否成功设置（需要已设置输入形状）</returns>
+    bool setLengthThresholdByBoundingBox(double ratio = 0.001);
 
     /// <summary>
     /// 设置角度阈值（度数）
@@ -86,7 +93,7 @@ public:
     /// 检测所有短边
     /// </summary>
     /// <returns>检测到的短边列表</returns>
-    std::vector<TopoDS_Edge> detectShortEdges();
+    std::vector<TopoDS_Edge> getShortEdges();
 
     /// <summary>
     /// 获取可合并的短边候选对
@@ -95,10 +102,23 @@ public:
     std::vector<MergeCandidate> findMergeCandidates();
 
     /// <summary>
-    /// 执行短边合并（TODO）
+    /// 执行短边合并
     /// </summary>
+    /// <returns>成功合并的边对数量</returns>
+    int performMerge();
+
+    /// <summary>
+    /// 获取合并后的结果形状
+    /// </summary>
+    /// <returns>处理后的形状</returns>
+    TopoDS_Shape getResultShape() const { return resultShape_; }
+
+    /// <summary>
+    /// 导出 STEP 文件
+    /// </summary>
+    /// <param name="fileName">输出文件名</param>
     /// <returns>是否成功</returns>
-    bool performMerge();
+    bool exportStep(const std::string& fileName);
 
     /// <summary>
     /// 获取检测到的短边列表
@@ -118,28 +138,38 @@ public:
     /// <returns>拓扑映射</returns>
     const TopTools_IndexedDataMapOfShapeListOfShape& getVertexEdgeMap() const { return vertexEdgeMap_; }
 
-    /// <summary>
-    /// 导出 STEP 文件（待实现）
-    /// </summary>
-    /// <param name="fileName">输出文件名</param>
-    /// <returns>是否成功</returns>
-    bool exportStep(const std::string& fileName);
-
 private:
-    // 阈值参数
-    double lengthThreshold_;      // 短边长度阈值
+    double lengthThreshold_;      // 短边长度阈值（实际计算值）
     double angleThresholdDeg_;    // 共线角度阈值（度）
-    double angleThresholdRad_;    // 共线角度阈值（弧度）
+    double bboxRatio_;            // 包围盒对角线比例（用于计算lengthThreshold_）
 
-    // 输入数据
     std::vector<TopoDS_Shape> inputShapes_;  // 输入形状列表
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;  // 顶点到边的映射
     
-    // 拓扑映射
-    TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;  // 顶点到边的映射
-    
-    // 结果数据
     std::vector<TopoDS_Edge> shortEdges_;       // 检测到的短边
     std::vector<MergeCandidate> mergeCandidates_;  // 可合并的候选
+    TopoDS_Shape resultShape_;                  // 合并后的结果形状
+
+    /// <summary>
+	/// 检测所有短边，更新 shortEdges_ 列表
+    /// </summary>
+    /// <returns></returns>
+    void detectShortEdges();
+
+    /// <summary>
+    /// 创建合并后的新边，连接两条边的非公共端点
+    /// </summary>
+    /// <param name="candidate">合并候选</param>
+    /// <returns>新创建的边，失败返回空边</returns>
+    TopoDS_Edge createMergedEdge(const MergeCandidate& candidate) const;
+
+    /// <summary>
+    /// 获取边的另一个端点（非指定顶点）
+    /// </summary>
+    /// <param name="edge">边</param>
+    /// <param name="commonVertex">已知端点</param>
+    /// <returns>另一个端点</returns>
+    TopoDS_Vertex getOtherVertex(const TopoDS_Edge& edge, const TopoDS_Vertex& commonVertex) const;
 
     /// <summary>
     /// 构建顶点到边的映射
@@ -160,16 +190,8 @@ private:
     /// <param name="commonVertex">输出公共顶点</param>
     /// <param name="adjacentEdge">输出相邻边</param>
     /// <returns>如果找到相邻边返回 true</returns>
-    bool findAdjacentEdge(const TopoDS_Edge& edge, TopoDS_Vertex& commonVertex, TopoDS_Edge& adjacentEdge) const;
+    bool findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_Vertex& bestCommonVertex, TopoDS_Edge& bestAdjacentEdge) const;
 
-    /// <summary>
-    /// 检查两边是否满足共线条件（夹角接近180度）
-    /// </summary>
-    /// <param name="e1">第一条边</param>
-    /// <param name="e2">第二条边</param>
-    /// <param name="commonVertex">公共顶点</param>
-    /// <returns>如果共线返回 true</returns>
-    bool isCollinear(const TopoDS_Edge& e1, const TopoDS_Edge& e2, const TopoDS_Vertex& commonVertex) const;
 
     /// <summary>
     /// 收集形状中的所有边

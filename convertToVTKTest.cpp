@@ -4,10 +4,8 @@
 #include <format>
 #include <chrono>
 
-#include<BRepBuilderAPI_MakeEdge.hxx>
-#include<BRepBuilderAPI_MakeWire.hxx>
-#include<TopExp_Explorer.hxx>
-#include <BRep_Tool.hxx>
+
+#include "MergeShortEdge.h"
 #include "TopoTools.h"
 #include "Viewer.h"
 
@@ -44,10 +42,12 @@ void mergeShortEdge(const std::string& fileName) {
 
 }
 
+
+
 int main()
 {
     std::string fileName = "F007-CarAircon-model3";
     //modelConvert(fileName);
-    
+
     return 0;
 }
