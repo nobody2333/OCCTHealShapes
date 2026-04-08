@@ -114,13 +114,6 @@ public:
     TopoDS_Shape getResultShape() const { return resultShape_; }
 
     /// <summary>
-    /// 导出 STEP 文件
-    /// </summary>
-    /// <param name="fileName">输出文件名</param>
-    /// <returns>是否成功</returns>
-    bool exportStep(const std::string& fileName);
-
-    /// <summary>
     /// 获取检测到的短边列表
     /// </summary>
     /// <returns>短边列表</returns>
@@ -144,12 +137,13 @@ private:
     double bboxRatio_;            // 包围盒对角线比例（用于计算lengthThreshold_）
 
     std::vector<TopoDS_Shape> inputShapes_;  // 输入形状列表
-        TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;  // 顶点到边的映射
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;  // 顶点到边的映射
     
     std::vector<TopoDS_Edge> shortEdges_;       // 检测到的短边
     std::vector<MergeCandidate> mergeCandidates_;  // 可合并的候选
     TopoDS_Shape resultShape_;                  // 合并后的结果形状
 
+    TopoDS_Shape executeUnifySameDomain(const TopoDS_Shape& shape);
     /// <summary>
 	/// 检测所有短边，更新 shortEdges_ 列表
     /// </summary>

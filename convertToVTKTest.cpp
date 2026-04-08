@@ -4,7 +4,7 @@
 #include <format>
 #include <chrono>
 
-
+#include "ApplicationInit.h"
 #include "MergeShortEdge.h"
 #include "TopoTools.h"
 #include "Viewer.h"
@@ -38,16 +38,49 @@ void modelConvert(const std::string& fileName) {
 }
 
 void mergeShortEdge(const std::string& fileName) {
-    std::string filePath = "./assets/shortEdge/" + fileName + ".stp";
+    std::string inputFilePath = "./assets/" + fileName + ".stp";
 
+    std::string outputFilePath = "./assets/fixedShortEdge/fixed" + fileName + ".stp";
+
+    ApplicationInit appInit;
+    if (!appInit.importStep(inputFilePath)) {
+        std::cerr << "Reading file fasiled" << inputFilePath << std::endl;
+        return;
+    }
+
+    std::vector<TopoDS_Shape> inputShapes = appInit.getAllShapes();
+    if (inputShapes.empty()) {
+        std::cerr << "Cannot find valid shapes!" << std::endl;
+        return;
+    }
+
+    MergeShortEdge shortEdgeMerger(0.005, 170.0);
+    shortEdgeMerger.setInputShapes(inputShapes);
+
+    std::cout << "Merging short edges......" << std::endl;
+    int mergedCount = shortEdgeMerger.performMerge();
+
+    // 获取合并后的最终结果
+    TopoDS_Shape resultShape = shortEdgeMerger.getResultShape();
+
+    if (appInit.exportStep(resultShape, outputFilePath)) {
+        std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+    }
+    else {
+        std::cerr << "Error: Failed to write STEP file." << std::endl;
+        return;
+    }
+
+    return;
 }
 
 
 
 int main()
 {
-    std::string fileName = "F007-CarAircon-model3";
+    std::string fileName = "dlr-f4";
     //modelConvert(fileName);
+	mergeShortEdge(fileName);
 
     return 0;
 }

@@ -5,6 +5,7 @@
 #include <TDocStd_Application.hxx>
 #include <TDocStd_Document.hxx>
 #include <STEPCAFControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS_Shell.hxx>
@@ -20,8 +21,11 @@ public:
     Handle(TDocStd_Application) getApp() const { return anApp_; }
     Handle(TDocStd_Document) getDoc() const { return aDoc_; }
 
-    // 导入 STEP 文件
+    // 导入 STEP 文件 (XCAF 模式，保留装配和颜色信息)
     bool importStep(const std::string& filePath);
+
+    // 导出处理后的 Shape 为 STEP 文件 (新增功能)
+    bool exportStep(const TopoDS_Shape& shape, const std::string& filePath) const;
 
     // 获取所有 TopoDS_Shape（包括 Solid 和 Shell）
     std::vector<TopoDS_Shape> getAllShapes() const;
