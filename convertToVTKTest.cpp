@@ -54,12 +54,15 @@ void mergeShortEdge(const std::string& fileName) {
         return;
     }
 
-    MergeShortEdge shortEdgeMerger(0.005, 170.0);
+    MergeShortEdge shortEdgeMerger(0.005, 120.0);
     shortEdgeMerger.setInputShapes(inputShapes);
+	std::cout << std::format("Merging short edges with length threshold: {} and angle threshold: {} degrees.", shortEdgeMerger.getLengthThreshold(), shortEdgeMerger.getAngleThresholdDeg()) << std::endl;
+
 
     std::cout << "Merging short edges......" << std::endl;
     int mergedCount = shortEdgeMerger.performMerge();
 
+	std::cout << std::format("Merged {} edge pairs.", mergedCount) << std::endl;
     // 获取合并后的最终结果
     TopoDS_Shape resultShape = shortEdgeMerger.getResultShape();
 
@@ -78,9 +81,9 @@ void mergeShortEdge(const std::string& fileName) {
 
 int main()
 {
-    std::string fileName = "dlr-f4";
+    std::string fileName = "bentDihedral";
     //modelConvert(fileName);
 	mergeShortEdge(fileName);
-
+	
     return 0;
 }

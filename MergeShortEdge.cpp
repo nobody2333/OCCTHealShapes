@@ -250,73 +250,72 @@ int MergeShortEdge::performMerge()
     }
 
     resultShape_ = executeUnifySameDomain(initialCompound);
-    return 1;
-    //inputShapes_.clear();
-    //inputShapes_.push_back(resultShape_);
-    //if (bboxRatio_ > 0.0) {
-    //    setLengthThresholdByBoundingBox(bboxRatio_);
-    //}
+    inputShapes_.clear();
+    inputShapes_.push_back(resultShape_);
+    if (bboxRatio_ > 0.0) {
+        setLengthThresholdByBoundingBox(bboxRatio_);
+    }
 
-    ////清理旧缓存
-    //shortEdges_.clear();
-    //mergeCandidates_.clear();
-    //vertexEdgeMap_.Clear();
+    //清理旧缓存
+    shortEdges_.clear();
+    mergeCandidates_.clear();
+    vertexEdgeMap_.Clear();
 
-    //// 获取合并候选项
-    //findMergeCandidates();
+    // 获取合并候选项
+    findMergeCandidates();
 
-    //if (mergeCandidates_.empty()) {
-    //    return 0;
-    //}
+    if (mergeCandidates_.empty()) {
+        return 0;
+    }
 
-    //// 执行合并
-    //BRepTools_ReShape reshaper;
-    //int mergeCount = 0;
-    //TopTools_MapOfShape removedEdges;
+    // 执行合并
+    BRepTools_ReShape reshaper;
+    int mergeCount = 0;
+    TopTools_MapOfShape removedEdges;
 
-    //for (const auto& candidate : mergeCandidates_) {
-    //    if (removedEdges.Contains(candidate.edge1) || removedEdges.Contains(candidate.edge2)) {
-    //        continue;
-    //    }
+    for (const auto& candidate : mergeCandidates_) {
+        if (removedEdges.Contains(candidate.edge1) || removedEdges.Contains(candidate.edge2)) {
+            continue;
+        }
 
-    //    TopoDS_Edge newEdge = createMergedEdge(candidate);
-    //    if (newEdge.IsNull()) 
-    //        continue;
+        TopoDS_Edge newEdge = createMergedEdge(candidate);
+        if (newEdge.IsNull()) 
+            continue;
 
-    //    // 设置合适的公差，由于底层几何改变为直线，必须放大公差让 ShapeFix 修正 PCurve
-    //    builder.UpdateEdge(newEdge, candidate.length1 * 1.5);
-    //     
-    //    reshaper.Replace(candidate.edge2, newEdge);
-    //    reshaper.Remove(candidate.edge1);
+        // 设置合适的公差，由于底层几何改变为直线，必须放大公差让 ShapeFix 修正 PCurve
+        builder.UpdateEdge(newEdge, candidate.length1 * 1.5);
+         
+        reshaper.Replace(candidate.edge2, newEdge);
+        reshaper.Remove(candidate.edge1);
 
-    //    removedEdges.Add(candidate.edge1);
-    //    removedEdges.Add(candidate.edge2);
-    //    mergeCount++;
-    //}
+        removedEdges.Add(candidate.edge1);
+        removedEdges.Add(candidate.edge2);
+        mergeCount++;
+    }
 
-    //resultShape_ = reshaper.Apply(resultShape_);
+    resultShape_ = reshaper.Apply(resultShape_);
 
-    //// 严谨的拓扑修复阶段
-    //ShapeFix_Shape fixer(resultShape_);
-    //fixer.SetPrecision(lengthThreshold_ * 2.0); // 提供基于短边阈值的修复精度
-    //fixer.SetMaxTolerance(lengthThreshold_ * 10.0);
-    //fixer.FixWireTool()->FixEdgeCurvesMode() = 1; // 强制修复边曲线
-    //fixer.FixFaceTool()->FixMissingSeamMode() = 1;
-    //fixer.Perform();
+    // 严谨的拓扑修复阶段
+    ShapeFix_Shape fixer(resultShape_);
+    fixer.SetPrecision(lengthThreshold_ * 2.0); // 提供基于短边阈值的修复精度
+    fixer.SetMaxTolerance(lengthThreshold_ * 10.0);
+    fixer.FixWireTool()->FixEdgeCurvesMode() = 1; // 强制修复边曲线
+    fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+    fixer.Perform();
 
-    //resultShape_ = fixer.Shape();
+    resultShape_ = fixer.Shape();
 
-    //if (!resultShape_.IsNull()) {
-    //    inputShapes_.clear();
-    //    inputShapes_.push_back(resultShape_);
-    //    if (bboxRatio_ > 0.0) 
-    //        setLengthThresholdByBoundingBox(bboxRatio_);
-    //    shortEdges_.clear();
-    //    mergeCandidates_.clear();
-    //    vertexEdgeMap_.Clear();
-    //}
+    if (!resultShape_.IsNull()) {
+        inputShapes_.clear();
+        inputShapes_.push_back(resultShape_);
+        if (bboxRatio_ > 0.0) 
+            setLengthThresholdByBoundingBox(bboxRatio_);
+        shortEdges_.clear();
+        mergeCandidates_.clear();
+        vertexEdgeMap_.Clear();
+    }
 
-    //return mergeCount;
+    return mergeCount;
 }
 
 TopoDS_Edge MergeShortEdge::createMergedEdge(const MergeCandidate& candidate) const
