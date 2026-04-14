@@ -3,8 +3,14 @@
 #include <vector>
 #include <format>
 #include <chrono>
+#include <iostream>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 
 #include "ApplicationInit.h"
+#include "GeometryUtils.h"
 #include "MergeShortEdge.h"
 #include "TopoTools.h"
 #include "Viewer.h"
@@ -37,6 +43,33 @@ void modelConvert(const std::string& fileName) {
     std::cout << "Time cost: " << duration.count() << " seconds" << std::endl;
 }
 
+void computeLength(const std::vector<TopoDS_Shape>& shapes) {
+    for (std::size_t shapeIndex = 0; shapeIndex < shapes.size(); ++shapeIndex) {
+        const TopoDS_Shape& shape = shapes[shapeIndex];
+        if (shape.IsNull()) {
+            std::cout << std::format("Shape {} is null, skip.", shapeIndex) << std::endl;
+            continue;
+        }
+
+        TopTools_MapOfShape uniqueEdges;
+        int edgeCount = 0;
+        std::cout << std::format("Shape {} edge lengths:", shapeIndex) << std::endl;
+
+        for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+            if (!uniqueEdges.Add(edge)) {
+                continue;
+            }
+
+            const double length = GeometryUtils::ComputeEdgeLength(edge);
+            std::cout << std::format("  Edge {}: {:.9f}", edgeCount, length) << std::endl;
+            ++edgeCount;
+        }
+
+        std::cout << std::format("Shape {} unique edge count: {}", shapeIndex, edgeCount) << std::endl;
+    }
+}
+
 void mergeShortEdge(const std::string& fileName) {
     std::string inputFilePath = "./assets/" + fileName + ".stp";
 
@@ -53,6 +86,8 @@ void mergeShortEdge(const std::string& fileName) {
         std::cerr << "Cannot find valid shapes!" << std::endl;
         return;
     }
+
+    computeLength(inputShapes);
 
     MergeShortEdge shortEdgeMerger(0.005, 120.0);
     shortEdgeMerger.setInputShapes(inputShapes);
