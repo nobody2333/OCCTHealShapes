@@ -15,6 +15,7 @@
 #include <BRepTools_ReShape.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Edge.hxx>
+#include <ShapeFix_Wireframe.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <gp_Pnt.hxx>
@@ -59,6 +60,7 @@ void MergeShortEdge::setInputShape(const TopoDS_Shape& shape)
     shortEdges_.clear();
     mergeCandidates_.clear();
     vertexEdgeMap_.Clear();
+    edgeFaceMap_.Clear();
     resultShape_.Nullify();
 
     refreshLengthThreshold();
@@ -72,6 +74,7 @@ void MergeShortEdge::setInputShapes(const std::vector<TopoDS_Shape>& shapes)
     shortEdges_.clear();
     mergeCandidates_.clear();
     vertexEdgeMap_.Clear();
+    edgeFaceMap_.Clear();
     resultShape_.Nullify();
 
     refreshLengthThreshold();
@@ -80,6 +83,7 @@ void MergeShortEdge::setInputShapes(const std::vector<TopoDS_Shape>& shapes)
 void MergeShortEdge::buildTopologyMap()
 {
     vertexEdgeMap_.Clear();
+    edgeFaceMap_.Clear();
 
     TopoDS_Compound compound;
     BRep_Builder builder;
@@ -89,6 +93,7 @@ void MergeShortEdge::buildTopologyMap()
     }
 
     TopologyUtils::BuildVertexEdgeMap(compound, vertexEdgeMap_);
+    TopExp::MapShapesAndAncestors(compound, TopAbs_EDGE, TopAbs_FACE, edgeFaceMap_);
 }
 
 bool MergeShortEdge::refreshLengthThreshold()
@@ -126,8 +131,8 @@ double MergeShortEdge::computeStatisticBasedLengthThreshold() const
 
     std::sort(logLengths.begin(), logLengths.end());
     //取排序后的前10%
-    const std::size_t quantileIndex = static_cast<std::size_t>(0.1 * static_cast<double>(logLengths.size() - 1));
-    return std::exp(logLengths[quantileIndex]) * 0.5;
+    const std::size_t quantileIndex = static_cast<std::size_t>(0.10 * static_cast<double>(logLengths.size() - 1));
+    return std::exp(logLengths[quantileIndex]);
 }
 
 bool MergeShortEdge::satisfiesLocalLengthCriterion(const TopoDS_Edge& edge) const
@@ -335,34 +340,6 @@ Handle(Geom_Curve) MergeShortEdge::getUnderlyingCurve(const TopoDS_Edge& edge) c
     return curve;
 }
 
-TopoDS_Edge MergeShortEdge::createMergedEdgeFromSharedBasisCurve(
-    const MergeCandidate& candidate,
-    const Handle(Geom_Curve)& sharedCurve) const
-{
-    if (sharedCurve.IsNull()) {
-        return TopoDS_Edge();
-    }
-
-    const TopoDS_Vertex v1 = getOtherVertex(candidate.edge1, candidate.commonVertex);
-    const TopoDS_Vertex v2 = getOtherVertex(candidate.edge2, candidate.commonVertex);
-    if (v1.IsNull() || v2.IsNull()) {
-        return TopoDS_Edge();
-    }
-
-    try {
-        BRepBuilderAPI_MakeEdge edgeMaker(sharedCurve, v1, v2);
-        if (edgeMaker.IsDone()) {
-            TopoDS_Edge newEdge = edgeMaker.Edge();
-            newEdge.Orientation(candidate.edge2.Orientation());
-            return newEdge;
-        }
-    }
-    catch (Standard_Failure&) {
-    }
-
-    return TopoDS_Edge();
-}
-
 TopoDS_Edge MergeShortEdge::createMergedEdgeByCompositeBSpline(const MergeCandidate& candidate) const
 {
     const TopoDS_Vertex v1 = getOtherVertex(candidate.edge1, candidate.commonVertex);
@@ -457,8 +434,72 @@ bool MergeShortEdge::isShortEdge(const TopoDS_Edge& edge) const
         satisfiesLocalLengthCriterion(edge);
 }
 
+bool MergeShortEdge::isHighRiskEdge(const TopoDS_Edge& edge) const
+{
+    if (edge.IsNull()) {
+        return true;
+    }
+
+    if (BRep_Tool::Degenerated(edge)) {
+        return true;
+    }
+
+    if (BRep_Tool::IsClosed(edge)) {
+        return true;
+    }
+
+    TopLoc_Location loc;
+    Standard_Real first = 0.0;
+    Standard_Real last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, loc, first, last);
+    if (curve.IsNull()) {
+        return true;
+    }
+
+    const auto hasSeamOnFaces = [&](const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap) {
+        if (!edgeFaceMap.Contains(edge)) {
+            return false;
+        }
+
+        const TopTools_ListOfShape& faces = edgeFaceMap.FindFromKey(edge);
+        for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Value());
+            if (!face.IsNull() && BRep_Tool::IsClosed(edge, face)) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    if (hasSeamOnFaces(edgeFaceMap_)) {
+        return true;
+    }
+
+    if (!inputShapes_.empty()) {
+        TopTools_IndexedDataMapOfShapeListOfShape localEdgeFaceMap;
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        for (const auto& shape : inputShapes_) {
+            builder.Add(compound, shape);
+        }
+
+        TopExp::MapShapesAndAncestors(compound, TopAbs_EDGE, TopAbs_FACE, localEdgeFaceMap);
+        if (hasSeamOnFaces(localEdgeFaceMap)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool MergeShortEdge::findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_Vertex& bestCommonVertex, TopoDS_Edge& bestAdjacentEdge) const
 {
+    if (isHighRiskEdge(shortEdge)) {
+        return false;
+    }
+
     const TopoDS_Vertex v1 = TopExp::FirstVertex(shortEdge);
     const TopoDS_Vertex v2 = TopExp::LastVertex(shortEdge);
 
@@ -482,6 +523,10 @@ bool MergeShortEdge::findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_V
         for (TopTools_ListIteratorOfListOfShape it(edgeList); it.More(); it.Next()) {
             const TopoDS_Edge adjEdge = TopoDS::Edge(it.Value());
             if (adjEdge.IsSame(shortEdge)) {
+                continue;
+            }
+
+            if (isHighRiskEdge(adjEdge)) {
                 continue;
             }
 
@@ -513,21 +558,64 @@ void MergeShortEdge::detectShortEdges()
         return;
     }
 
-    if (thresholdMode_ == ShortEdgeThresholdMode::HybridGlobalAndLocal &&
-        vertexEdgeMap_.Extent() == 0) {
-        // 混合模式依赖局部邻边长度，因此短边检测前要先具备顶点-边映射。
+    if (vertexEdgeMap_.Extent() == 0 || edgeFaceMap_.Extent() == 0) {
         buildTopologyMap();
     }
 
     const std::vector<TopoDS_Edge> allEdges = collectAllEdges();
     for (const auto& edge : allEdges) {
+        if (isHighRiskEdge(edge)) {
+            continue;
+        }
+
         if (isShortEdge(edge)) {
             shortEdges_.push_back(edge);
         }
     }
 }
 
-TopoDS_Shape MergeShortEdge::executeUnifySameDomain(const TopoDS_Shape& shape)
+TopoDS_Shape MergeShortEdge::preprocessWithShapeFixWireframe(const TopoDS_Shape& shape) const
+{
+    if (shape.IsNull()) {
+        return shape;
+    }
+
+    ShapeFix_Wireframe wireframeFix(shape);
+    const double preFixPrecision =
+        (lengthThreshold_ > 0.0)
+        ? std::max(Precision::Confusion(), lengthThreshold_ * 0.5)
+        : Precision::Confusion();
+
+    wireframeFix.SetPrecision(preFixPrecision);
+    wireframeFix.ModeDropSmallEdges() = Standard_False;
+    
+    wireframeFix.SetLimitAngle(angleThresholdDeg_ * M_PI / 180.0);
+    wireframeFix.FixSmallEdges();
+
+    const TopoDS_Shape fixedShape = wireframeFix.Shape();
+    return fixedShape.IsNull() ? shape : fixedShape;
+}
+
+TopoDS_Shape MergeShortEdge::preprocessInputShape(const TopoDS_Shape& shape) const
+{
+    if (shape.IsNull()) {
+        return shape;
+    }
+
+    TopoDS_Shape preprocessed = preprocessWithShapeFixWireframe(shape);
+    if (preprocessed.IsNull()) {
+        preprocessed = shape;
+    }
+
+    TopoDS_Shape unified = executeUnifySameDomain(preprocessed);
+    if (unified.IsNull()) {
+        return preprocessed;
+    }
+
+    return unified;
+}
+
+TopoDS_Shape MergeShortEdge::executeUnifySameDomain(const TopoDS_Shape& shape) const
 {
     if (shape.IsNull()) {
         return shape;
@@ -591,14 +679,19 @@ int MergeShortEdge::performMerge()
         return 0;
     }
 
-    BRep_Builder builder;
-    TopoDS_Compound initialCompound;
-    builder.MakeCompound(initialCompound);
-    for (const auto& shape : inputShapes_) {
-        builder.Add(initialCompound, shape);
+    if (inputShapes_.size() == 1) {
+        resultShape_ = preprocessInputShape(inputShapes_[0]);
+    }
+    else {
+        BRep_Builder builder;
+        TopoDS_Compound initialCompound;
+        builder.MakeCompound(initialCompound);
+        for (const auto& shape : inputShapes_) {
+            builder.Add(initialCompound, shape);
+        }
+        resultShape_ = preprocessInputShape(initialCompound);
     }
 
-    resultShape_ = executeUnifySameDomain(initialCompound);
     inputShapes_.clear();
     inputShapes_.push_back(resultShape_);
     refreshLengthThreshold();
@@ -606,26 +699,141 @@ int MergeShortEdge::performMerge()
     shortEdges_.clear();
     mergeCandidates_.clear();
     vertexEdgeMap_.Clear();
+    edgeFaceMap_.Clear();
 
     findMergeCandidates();
     if (mergeCandidates_.empty()) {
         return 0;
     }
 
-    const TopoDS_Shape baseShape = resultShape_;
-    BRepTools_ReShape reshaper;
+    const std::vector<std::vector<MergeCandidate>> candidateBatches = buildCandidateBatches(mergeCandidates_);
+    TopoDS_Shape currentShape = resultShape_;
     int mergeCount = 0;
-    std::vector<TopoDS_Edge> newEdges;
-    TopTools_MapOfShape removedEdges;
 
-    for (const auto& candidate : mergeCandidates_) {
-        if (removedEdges.Contains(candidate.edge1) || removedEdges.Contains(candidate.edge2)) {
+    for (const auto& batch : candidateBatches) {
+        TopoDS_Shape committedShape;
+        int committedCount = 0;
+        if (!tryApplyBatch(currentShape, batch, committedShape, committedCount)) {
+            continue;
+        }
+
+        currentShape = committedShape;
+        mergeCount += committedCount;
+    }
+
+    resultShape_ = currentShape;
+    inputShapes_.clear();
+    inputShapes_.push_back(resultShape_);
+    shortEdges_.clear();
+    mergeCandidates_.clear();
+    vertexEdgeMap_.Clear();
+    edgeFaceMap_.Clear();
+    refreshLengthThreshold();
+
+    return mergeCount;
+}
+
+std::vector<std::vector<MergeCandidate>> MergeShortEdge::buildCandidateBatches(const std::vector<MergeCandidate>& candidates) const
+{
+    std::vector<std::vector<MergeCandidate>> batches;
+    // 第 i 个 batch 里已经占用过的 edge 集合
+    std::vector<TopTools_MapOfShape> batchEdges;
+    // 第 i 个 batch 里已经占用过的 vertex 集合
+    std::vector<TopTools_MapOfShape> batchVertices;
+
+    for (const auto& candidate : candidates) {
+        // 取出每个candidate会影响到的边和顶点
+        const TopoDS_Vertex otherVertex1 = getOtherVertex(candidate.edge1, candidate.commonVertex);
+        const TopoDS_Vertex otherVertex2 = getOtherVertex(candidate.edge2, candidate.commonVertex);
+
+        const TopoDS_Shape candidateEdges[] = { candidate.edge1, candidate.edge2 };
+        const TopoDS_Shape candidateVertices[] = { candidate.commonVertex, otherVertex1, otherVertex2 };
+
+        bool placed = false;
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            bool hasConflict = false;
+
+            for (const auto& edge : candidateEdges) {
+                if (!edge.IsNull() && batchEdges[i].Contains(edge)) {
+                    hasConflict = true;
+                    break;
+                }
+            }
+
+            if (!hasConflict) {
+                for (const auto& vertex : candidateVertices) {
+                    if (!vertex.IsNull() && batchVertices[i].Contains(vertex)) {
+                        hasConflict = true;
+                        break;
+                    }
+                }
+            }
+
+            if (hasConflict) {
+                continue;
+            }
+
+            batches[i].push_back(candidate);
+            for (const auto& edge : candidateEdges) {
+                if (!edge.IsNull()) {
+                    batchEdges[i].Add(edge);
+                }
+            }
+            for (const auto& vertex : candidateVertices) {
+                if (!vertex.IsNull()) {
+                    batchVertices[i].Add(vertex);
+                }
+            }
+            placed = true;
+            break;
+        }
+
+        if (placed) {
+            continue;
+        }
+
+        batches.emplace_back(1, candidate);
+        batchEdges.emplace_back();
+        batchVertices.emplace_back();
+        for (const auto& edge : candidateEdges) {
+            if (!edge.IsNull()) {
+                batchEdges.back().Add(edge);
+            }
+        }
+        for (const auto& vertex : candidateVertices) {
+            if (!vertex.IsNull()) {
+                batchVertices.back().Add(vertex);
+            }
+        }
+    }
+
+    return batches;
+}
+
+bool MergeShortEdge::tryApplyBatch(const TopoDS_Shape& baseShape,
+                                   const std::vector<MergeCandidate>& batch,
+                                   TopoDS_Shape& committedShape,
+                                   int& committedCount) const
+{
+    committedShape = TopoDS_Shape();
+    committedCount = 0;
+
+    if (baseShape.IsNull() || batch.empty()) {
+        return false;
+    }
+
+    BRep_Builder builder;
+    BRepTools_ReShape batchReshaper;
+    std::vector<TopoDS_Edge> batchNewEdges;
+    TopTools_MapOfShape batchRemovedEdges;
+
+    for (const auto& candidate : batch) {
+        if (batchRemovedEdges.Contains(candidate.edge1) || batchRemovedEdges.Contains(candidate.edge2)) {
             continue;
         }
 
         TopoDS_Edge newEdge = createMergedEdge(candidate);
         if (newEdge.IsNull() || !validateMergedEdgeGeometry(newEdge)) {
-            // 局部重建不可靠时直接跳过，不把问题留给后面的 ShapeFix 去兜底。
             continue;
         }
 
@@ -636,62 +844,46 @@ int MergeShortEdge::performMerge()
             });
         builder.UpdateEdge(newEdge, safeTolerance);
 
-        reshaper.Replace(candidate.edge2, newEdge);
-        reshaper.Remove(candidate.edge1);
+        batchReshaper.Replace(candidate.edge2, newEdge);
+        batchReshaper.Remove(candidate.edge1);
 
-        newEdges.push_back(newEdge);
-        removedEdges.Add(candidate.edge1);
-        removedEdges.Add(candidate.edge2);
-        mergeCount++;
+        batchNewEdges.push_back(newEdge);
+        batchRemovedEdges.Add(candidate.edge1);
+        batchRemovedEdges.Add(candidate.edge2);
+        committedCount++;
     }
 
-    if (mergeCount == 0) {
-        resultShape_ = baseShape;
-        return 0;
+    if (committedCount == 0) {
+        return false;
     }
 
-    resultShape_ = reshaper.Apply(resultShape_);
-
-    if (!repairAffectedPCurves(resultShape_, newEdges)) {
-        resultShape_ = baseShape;
-        inputShapes_.clear();
-        inputShapes_.push_back(resultShape_);
-        shortEdges_.clear();
-        mergeCandidates_.clear();
-        vertexEdgeMap_.Clear();
-        refreshLengthThreshold();
-        return 0;
+    TopoDS_Shape trialShape = batchReshaper.Apply(baseShape);
+    if (trialShape.IsNull()) {
+        committedCount = 0;
+        return false;
     }
 
-    ShapeFix_Shape fixer(resultShape_);
+    if (!repairAffectedPCurves(trialShape, batchNewEdges)) {
+        committedCount = 0;
+        return false;
+    }
+
+    ShapeFix_Shape fixer(trialShape);
     const double fixPrecision = std::max(lengthThreshold_ * 2.0, Precision::Confusion());
     fixer.SetPrecision(fixPrecision);
     fixer.SetMaxTolerance(std::max(lengthThreshold_ * 5.0, fixPrecision));
     fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
     fixer.FixFaceTool()->FixMissingSeamMode() = 1;
     fixer.Perform();
-    resultShape_ = fixer.Shape();
+    trialShape = fixer.Shape();
 
-    if (!validateShape(resultShape_)) {
-        // 整体验证失败时回退到 merge 前结果，避免输出一个“修过但更坏”的模型。
-        resultShape_ = baseShape;
-        inputShapes_.clear();
-        inputShapes_.push_back(resultShape_);
-        shortEdges_.clear();
-        mergeCandidates_.clear();
-        vertexEdgeMap_.Clear();
-        refreshLengthThreshold();
-        return 0;
+    if (!validateShape(trialShape)) {
+        committedCount = 0;
+        return false;
     }
 
-    inputShapes_.clear();
-    inputShapes_.push_back(resultShape_);
-    shortEdges_.clear();
-    mergeCandidates_.clear();
-    vertexEdgeMap_.Clear();
-    refreshLengthThreshold();
-
-    return mergeCount;
+    committedShape = trialShape;
+    return true;
 }
 
 TopoDS_Edge MergeShortEdge::createMergedEdge(const MergeCandidate& candidate) const
@@ -709,14 +901,6 @@ TopoDS_Edge MergeShortEdge::createMergedEdge(const MergeCandidate& candidate) co
 
     Handle(Geom_Curve) baseCurve = getUnderlyingCurve(candidate.edge2);
     if (!baseCurve.IsNull()) {
-        const Handle(Geom_Curve) shortBasisCurve = getUnderlyingCurve(candidate.edge1);
-        if (!shortBasisCurve.IsNull() && shortBasisCurve == baseCurve) {
-            TopoDS_Edge sharedBasisEdge = createMergedEdgeFromSharedBasisCurve(candidate, baseCurve);
-            if (!sharedBasisEdge.IsNull()) {
-                return sharedBasisEdge;
-            }
-        }
-
         TopoDS_Edge compositeSplineEdge = createMergedEdgeByCompositeBSpline(candidate);
         if (!compositeSplineEdge.IsNull()) {
             return compositeSplineEdge;

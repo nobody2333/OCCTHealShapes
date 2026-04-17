@@ -10,7 +10,7 @@
 #include <TopoDS_Solid.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Edge.hxx>
-#include <TDF_Label.hxx>
+#include <Interface_Static.hxx>
 
 class ApplicationInit {
 public:
@@ -23,6 +23,9 @@ public:
 
     // 导入 STEP 文件 (XCAF 模式，保留装配和颜色信息)
     bool importStep(const std::string& filePath);
+
+	// 导入 IGES 文件
+	bool importIges(const std::string& filePath);
 
     // 导出处理后的 Shape 为 STEP 文件 (新增功能)
     bool exportStep(const TopoDS_Shape& shape, const std::string& filePath) const;
@@ -40,8 +43,13 @@ public:
     std::vector<TopoDS_Edge> getAllEdges() const;
 
 private:
-    void traverseLabels(const TDF_Label& aLabel, std::vector<TopoDS_Shape>& shapeVec) const;
+    bool transferAndCacheTopLevelShapes(Standard_Boolean isTransferred, const char* fileType);
+    void refreshShapeCache();
+    void clearShapeCache();
 
+    std::vector<TopoDS_Shape> aShapeVec_;
+    std::vector<TopoDS_Shell> aShellVec_;
+    std::vector<TopoDS_Solid> aSolidVec_;
     Handle(TDocStd_Application) anApp_;
     Handle(TDocStd_Document) aDoc_;
 };
