@@ -10,7 +10,6 @@
 #include <TopExp.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_Builder.hxx>
-#include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -349,35 +348,100 @@ TopoDS_Edge MergeShortEdge::createMergedEdgeByCompositeBSpline(const MergeCandid
     }
 
     try {
-        BRepAdaptor_Curve adaptor1(candidate.edge1);
-        BRepAdaptor_Curve adaptor2(candidate.edge2);
-        Handle(Geom_BSplineCurve) bs1 = adaptor1.BSpline();
-        Handle(Geom_BSplineCurve) bs2 = adaptor2.BSpline();
-        if (bs1.IsNull() || bs2.IsNull()) {
+        auto makeSegmentBSpline = [&](const TopoDS_Edge& edge) -> Handle(Geom_BSplineCurve) {
+            TopLoc_Location loc;
+            Standard_Real first = 0.0;
+            Standard_Real last = 0.0;
+            Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, loc, first, last);
+            if (curve.IsNull()) {
+                return Handle(Geom_BSplineCurve)();
+            }
+
+            if (!loc.IsIdentity()) {
+                curve = Handle(Geom_Curve)::DownCast(curve->Transformed(loc.Transformation()));
+            }
+            if (curve.IsNull()) {
+                return Handle(Geom_BSplineCurve)();
+            }
+
+            Handle(Geom_Curve) segmentCurve = new Geom_TrimmedCurve(curve, first, last);
+            Handle(Geom_BSplineCurve) bspline = GeomConvert::CurveToBSplineCurve(segmentCurve, Convert_QuasiAngular);
+            if (bspline.IsNull()) {
+                return Handle(Geom_BSplineCurve)();
+            }
+
+            return Handle(Geom_BSplineCurve)::DownCast(bspline->Copy());
+        };
+
+        Handle(Geom_BSplineCurve) edge1Seg = makeSegmentBSpline(candidate.edge1);
+        Handle(Geom_BSplineCurve) edge2Seg = makeSegmentBSpline(candidate.edge2);
+        if (edge1Seg.IsNull() || edge2Seg.IsNull()) {
             return TopoDS_Edge();
         }
 
-        Handle(Geom_BSplineCurve) seg1 = Handle(Geom_BSplineCurve)::DownCast(bs1->Copy());
-        Handle(Geom_BSplineCurve) seg2 = Handle(Geom_BSplineCurve)::DownCast(bs2->Copy());
-        if (seg1.IsNull() || seg2.IsNull()) {
+        auto orientSegment = [&](const Handle(Geom_BSplineCurve)& segment,
+                                 const TopoDS_Edge& edge,
+                                 const TopoDS_Vertex& startVertex,
+                                 const TopoDS_Vertex& endVertex) -> bool {
+            if (segment.IsNull() || startVertex.IsNull() || endVertex.IsNull()) {
+                return false;
+            }
+
+            const TopoDS_Vertex edgeFirst = TopExp::FirstVertex(edge);
+            const TopoDS_Vertex edgeLast = TopExp::LastVertex(edge);
+            if (edgeFirst.IsSame(startVertex) && edgeLast.IsSame(endVertex)) {
+                return true;
+            }
+            if (edgeFirst.IsSame(endVertex) && edgeLast.IsSame(startVertex)) {
+                segment->Reverse();
+                return true;
+            }
+
+            return false;
+        };
+
+        Handle(Geom_BSplineCurve) firstSeg;
+        Handle(Geom_BSplineCurve) secondSeg;
+        TopoDS_Vertex startVertex;
+        TopoDS_Vertex endVertex;
+
+        // 复合顺序以 edge2 的方向为主导：
+        // 若 edge2 从公共点出发，则整体方向为 other(edge1) -> common -> other(edge2)；
+        // 若 edge2 终止于公共点，则整体方向为 other(edge2) -> common -> other(edge1)。
+        if (candidate.commonVertex.IsSame(TopExp::FirstVertex(candidate.edge2))) {
+            firstSeg = edge1Seg;
+            secondSeg = edge2Seg;
+            startVertex = v1;
+            endVertex = v2;
+
+            if (!orientSegment(firstSeg, candidate.edge1, v1, candidate.commonVertex) ||
+                !orientSegment(secondSeg, candidate.edge2, candidate.commonVertex, v2)) {
+                return TopoDS_Edge();
+            }
+        }
+        else if (candidate.commonVertex.IsSame(TopExp::LastVertex(candidate.edge2))) {
+            firstSeg = edge2Seg;
+            secondSeg = edge1Seg;
+            startVertex = v2;
+            endVertex = v1;
+
+            if (!orientSegment(firstSeg, candidate.edge2, v2, candidate.commonVertex) ||
+                !orientSegment(secondSeg, candidate.edge1, candidate.commonVertex, v1)) {
+                return TopoDS_Edge();
+            }
+        }
+        else {
             return TopoDS_Edge();
         }
-		//确保两段底层曲线朝向一致
-        if (candidate.commonVertex.IsSame(TopExp::FirstVertex(candidate.edge1))) {
-            seg1->Reverse();
-        }
-        if (candidate.commonVertex.IsSame(TopExp::LastVertex(candidate.edge2))) {
-            seg2->Reverse();
-        }
-        
-        GeomConvert_CompCurveToBSplineCurve comp(seg1);
+
+        GeomConvert_CompCurveToBSplineCurve comp(firstSeg);
         const Standard_Real tol = std::max({
             Precision::Confusion(),
             BRep_Tool::Tolerance(candidate.commonVertex),
             BRep_Tool::Tolerance(candidate.edge1),
             BRep_Tool::Tolerance(candidate.edge2)
             });
-        if (!comp.Add(seg2, tol, Standard_True, Standard_True, 0)) {
+        if (!comp.Add(secondSeg, tol, Standard_True, Standard_True, 0)) {
             return TopoDS_Edge();
         }
 
@@ -386,7 +450,7 @@ TopoDS_Edge MergeShortEdge::createMergedEdgeByCompositeBSpline(const MergeCandid
             return TopoDS_Edge();
         }
 
-        BRepBuilderAPI_MakeEdge edgeMaker(mergedCurve, v1, v2);
+        BRepBuilderAPI_MakeEdge edgeMaker(mergedCurve, startVertex, endVertex);
         if (edgeMaker.IsDone()) {
             TopoDS_Edge newEdge = edgeMaker.Edge();
             newEdge.Orientation(candidate.edge2.Orientation());
@@ -394,6 +458,7 @@ TopoDS_Edge MergeShortEdge::createMergedEdgeByCompositeBSpline(const MergeCandid
         }
     }
     catch (Standard_Failure&) {
+        std::cout << "MergedEdge Failed!" << std::endl;
     }
 
     return TopoDS_Edge();
@@ -474,21 +539,6 @@ bool MergeShortEdge::isHighRiskEdge(const TopoDS_Edge& edge) const
 
     if (hasSeamOnFaces(edgeFaceMap_)) {
         return true;
-    }
-
-    if (!inputShapes_.empty()) {
-        TopTools_IndexedDataMapOfShapeListOfShape localEdgeFaceMap;
-        TopoDS_Compound compound;
-        BRep_Builder builder;
-        builder.MakeCompound(compound);
-        for (const auto& shape : inputShapes_) {
-            builder.Add(compound, shape);
-        }
-
-        TopExp::MapShapesAndAncestors(compound, TopAbs_EDGE, TopAbs_FACE, localEdgeFaceMap);
-        if (hasSeamOnFaces(localEdgeFaceMap)) {
-            return true;
-        }
     }
 
     return false;

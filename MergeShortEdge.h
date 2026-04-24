@@ -83,9 +83,9 @@ private:
     std::vector<MergeCandidate> mergeCandidates_;
     TopoDS_Shape resultShape_;
 
-    TopoDS_Shape preprocessWithShapeFixWireframe(const TopoDS_Shape& shape) const;
     //预处理
     TopoDS_Shape preprocessInputShape(const TopoDS_Shape& shape) const;
+    TopoDS_Shape preprocessWithShapeFixWireframe(const TopoDS_Shape& shape) const;
     TopoDS_Shape executeUnifySameDomain(const TopoDS_Shape& shape) const;
     // 按当前模式刷新有效阈值，避免手工阈值被后续流程隐式覆盖。
     bool refreshLengthThreshold();
@@ -121,6 +121,7 @@ private:
     // 排除不适合合并的侯选边
     bool isHighRiskEdge(const TopoDS_Edge& edge) const;
     bool isShortEdge(const TopoDS_Edge& edge) const;
+    // 找到最佳相邻边
     bool findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_Vertex& bestCommonVertex, TopoDS_Edge& bestAdjacentEdge) const;
     std::vector<TopoDS_Edge> collectAllEdges() const;
 };
