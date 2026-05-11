@@ -10,8 +10,20 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+
 
 class Geom_Curve;
+
+struct PolyCurveEdgeUse {
+    TopoDS_Edge edge;
+    bool reversed = false;
+};
+
+struct VirtualPolyCurve {
+    int id = 0;
+    std::vector<PolyCurveEdgeUse> edges;
+};
 
 struct MergeCandidate {
     TopoDS_Edge edge1;//edge1通常是短边
@@ -32,7 +44,7 @@ enum class ShortEdgeThresholdMode {
 
 class MergeShortEdge {
 public:
-    MergeShortEdge(double bboxRatio = 0.001, double angleThresholdDeg = 175.0);
+    MergeShortEdge(double bboxRatio = 0.001, double angleThresholdDeg = 160.0);
     ~MergeShortEdge() = default;
 
     MergeShortEdge(const MergeShortEdge&) = delete;
@@ -61,12 +73,18 @@ public:
 
     std::vector<TopoDS_Edge> getShortEdges();
     std::vector<MergeCandidate> findMergeCandidates();
+    // 执行修改几何的合并
     int performMerge();
 
     TopoDS_Shape getResultShape() const { return resultShape_; }
     const std::vector<TopoDS_Edge>& getShortEdges() const { return shortEdges_; }
     const std::vector<MergeCandidate>& getMergeCandidates() const { return mergeCandidates_; }
     const TopTools_IndexedDataMapOfShapeListOfShape& getVertexEdgeMap() const { return vertexEdgeMap_; }
+
+    // 仅建立外部虚拟 PolyCurve，不修改 OCCT 原始拓扑。
+    // 内部复用 findMergeCandidates() 的短边/邻边判定结果。
+    int buildVirtualPolyCurvesFromMergeCandidates();
+    const std::vector<VirtualPolyCurve>& getVirtualPolyCurves() const { return virtualPolyCurves_; }
 
 private:
     double lengthThreshold_;
@@ -78,19 +96,26 @@ private:
     std::vector<TopoDS_Shape> inputShapes_;
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap_;
-
+	std::vector<TopoDS_Edge> allEdges_;
     std::vector<TopoDS_Edge> shortEdges_;
     std::vector<MergeCandidate> mergeCandidates_;
     TopoDS_Shape resultShape_;
 
-    //预处理
+    std::vector<VirtualPolyCurve> virtualPolyCurves_;
+    TopTools_DataMapOfShapeInteger edgePolyCurveMap_;
+
+    void clearVirtualPolyCurves();
+    VirtualPolyCurve createVirtualPolyCurveFromCandidate(const MergeCandidate& candidate, int id) const;
+    PolyCurveEdgeUse makePolyCurveEdgeUse(const TopoDS_Edge& edge, const TopoDS_Vertex& startVertex, const TopoDS_Vertex& endVertex) const;
+
+    // 预处理
     TopoDS_Shape preprocessInputShape(const TopoDS_Shape& shape) const;
     TopoDS_Shape preprocessWithShapeFixWireframe(const TopoDS_Shape& shape) const;
     TopoDS_Shape executeUnifySameDomain(const TopoDS_Shape& shape) const;
     // 按当前模式刷新有效阈值，避免手工阈值被后续流程隐式覆盖。
     bool refreshLengthThreshold();
     // 从全局边长分布的下尾部估计一个更稳健的自动短边阈值。
-    double computeStatisticBasedLengthThreshold() const;
+    double computeStatisticBasedLengthThreshold();
     // 混合模式下，要求该边在局部连接关系里也明显偏短，避免误伤正常小特征。
     bool satisfiesLocalLengthCriterion(const TopoDS_Edge& edge) const;
     // 校验新构造边的几何是否仍与两端顶点匹配，减少坏边进入后续拓扑修复。
@@ -123,5 +148,5 @@ private:
     bool isShortEdge(const TopoDS_Edge& edge) const;
     // 找到最佳相邻边
     bool findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_Vertex& bestCommonVertex, TopoDS_Edge& bestAdjacentEdge) const;
-    std::vector<TopoDS_Edge> collectAllEdges() const;
+    void collectAllEdges();
 };

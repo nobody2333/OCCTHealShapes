@@ -71,42 +71,36 @@ void computeLength(const std::vector<TopoDS_Shape>& shapes) {
 }
 
 void mergeShortEdge(const std::string& fileName) {
-    size_t pos = fileName.find('.');
-    std::string suffix = fileName.substr(pos + 1);
-    std::string modleName = fileName.substr(0, pos);
-
-    std::string inputFilePath = "./assets/" + fileName;
-    std::string outputFilePath = "./assets/fixedShortEdge/fixed" + modleName + ".stp";
+    
+    std::string inputFilePath = "./assets/" + fileName + ".stp";
+    std::string outputFilePath = "./assets/fixedShortEdge/fixed" + fileName + ".stp";
     ApplicationInit appInit;
+  
+	auto t0 = std::chrono::system_clock::now();
+    if (!appInit.importStep(inputFilePath)) {
+        std::cerr << "Reading file fasiled" << inputFilePath << std::endl;
+        return;
+    }
+	auto t1 = std::chrono::system_clock::now();
+    std::cout << "ReadFile and Transfer cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count()
+        << " s" << std::endl;
 
-    if (suffix == "iges") {
-        if (!appInit.importIges(inputFilePath)) {
-            std::cerr << "Reading file fasiled" << inputFilePath << std::endl;
-            return;
-        }
-    }
-    else {
-        if (!appInit.importStep(inputFilePath)) {
-            std::cerr << "Reading file fasiled" << inputFilePath << std::endl;
-            return;
-        }
-    }
     std::vector<TopoDS_Shape> inputShapes = appInit.getAllShapes();
     if (inputShapes.empty()) {
         std::cerr << "Cannot find valid shapes!" << std::endl;
         return;
     }
-
-    std::cout << "Top-level shape count: " << inputShapes.size() << std::endl;
+    /*std::cout << "Top-level shape count: " << inputShapes.size() << std::endl;
     for (std::size_t i = 0; i < inputShapes.size(); ++i) {
         std::cout << std::format("  Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
-    }
+    }*/
 
 
     MergeShortEdge shortEdgeMerger;
     shortEdgeMerger.setInputShapes(inputShapes);
-    shortEdgeMerger.setLengthThreshold(0.02);
-	shortEdgeMerger.setAngleThresholdDeg(120.0);
+    /*shortEdgeMerger.setLengthThreshold(0.02);
+	shortEdgeMerger.setAngleThresholdDeg(120.0);*/
     std::cout << std::format("Merging short edges with length threshold: {} and angle threshold: {} degrees.", shortEdgeMerger.getLengthThreshold(), shortEdgeMerger.getAngleThresholdDeg()) << std::endl;
 
 
@@ -123,7 +117,10 @@ void mergeShortEdge(const std::string& fileName) {
         std::cerr << "Error: Failed to write STEP file." << std::endl;
         return;
     }
-
+	auto t2 = std::chrono::system_clock::now();
+    std::cout << "Total cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t2 - t0).count()
+        << " s" << std::endl;
     return;
 }
 
@@ -131,7 +128,7 @@ void mergeShortEdge(const std::string& fileName) {
 
 int main()
 {
-    std::string fileName = "bentDihedral.stp";
+    std::string fileName = "F003-CarAircon-model1";
     //modelConvert(fileName);
 	mergeShortEdge(fileName);
     return 0;

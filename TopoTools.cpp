@@ -509,22 +509,34 @@ void TopoTools::traverseLabels(const TDF_Label& aLabel, std::vector<TopoDS_Solid
 
 
 // 从STEP文件中导入shapes
-bool TopoTools::importSTEP(std::string_view aFilePath) const
+bool TopoTools::importSTEP(std::string_view aFilePath)
 {
     std::cout << "Reading STEP file: " << aFilePath << "......" << std::endl;
     STEPCAFControl_Reader aReader_STEP;
+    auto t0 = std::chrono::steady_clock::now();
     const IFSelect_ReturnStatus aStatus = aReader_STEP.ReadFile(aFilePath.data());
+    auto t1 = std::chrono::steady_clock::now();
     if (aStatus != IFSelect_RetDone)
     {
         std::cout << "A BREP file was not read successfully" << std::endl;
         return false;
     }
+    std::cout << "Reading STEP file successfully." << std::endl;
+    std::cout << "ReadFile cost: "
+        << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count()
+        << " ms" << std::endl;
     aReader_STEP.Transfer(aDoc_);
+
+    auto t2 = std::chrono::steady_clock::now();
+    std::cout << "Transfer cost: "
+        << std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count()
+        << " ms" << std::endl;
+    std::cout << "Transfer to doc successfully." << std::endl;
     return true;
 }
 
 
-bool TopoTools::importIGES(std::string_view aFilePath) const
+bool TopoTools::importIGES(std::string_view aFilePath)
 {
     std::cout << "Reading IGES file......" << aFilePath << std::endl;
     IGESCAFControl_Reader aReader_IGES;
@@ -548,7 +560,7 @@ std::vector<Body*> TopoTools::getBodies()
     std::vector<TopoDS_Shell> aShellVec;
     std::vector<TDF_Label> aShellLabelVec;
     traverseLabels(aDoc_->Main(), aSolidVec, aShellVec, aShellLabelVec);
-
+	std::cout << "Finished traversing labels." << std::endl;
     int aSolidIndex = 1;
     for (auto& aTopoShape : aSolidVec)
     {

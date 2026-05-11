@@ -37,8 +37,8 @@ public:
 
     std::vector<Body*> getBodies();
 
-    bool importSTEP(std::string_view aFilePath) const;
-    bool importIGES(std::string_view aFilePath) const;
+    bool importSTEP(std::string_view aFilePath);
+    bool importIGES(std::string_view aFilePath);
 
     bool exportVTK(std::string_view aFileName, const std::vector<Face*>& aFaceVec);
     bool exportOBJ(std::string_view aFileName, const std::vector<Face*>& aFaceVec);
