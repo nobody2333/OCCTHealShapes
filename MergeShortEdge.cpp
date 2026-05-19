@@ -15,7 +15,6 @@
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Wireframe.hxx>
-#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <gp_Pnt.hxx>
 #include <TopTools_MapOfShape.hxx>
@@ -51,10 +50,7 @@ MergeShortEdge::MergeShortEdge(double bboxRatio, double angleThresholdDeg)
 
 void MergeShortEdge::setInputShape(const TopoDS_Shape& shape)
 {
-    inputShapes_.clear();
-    if (!shape.IsNull()) {
-        inputShapes_.push_back(shape);
-    }
+    inputShape_ = shape;
 
 	allEdges_.clear();
     shortEdges_.clear();
@@ -63,21 +59,6 @@ void MergeShortEdge::setInputShape(const TopoDS_Shape& shape)
     edgeFaceMap_.Clear();
     resultShape_.Nullify();
     clearVirtualPolyCurves();
-    refreshLengthThreshold();
-}
-
-void MergeShortEdge::setInputShapes(const std::vector<TopoDS_Shape>& shapes)
-{
-    inputShapes_ = shapes;
-    std::erase_if(inputShapes_, [](const TopoDS_Shape& s) { return s.IsNull(); });
-    
-    allEdges_.clear();
-    shortEdges_.clear();
-    mergeCandidates_.clear();
-    vertexEdgeMap_.Clear();
-    edgeFaceMap_.Clear();
-    resultShape_.Nullify();
-	clearVirtualPolyCurves();
     refreshLengthThreshold();
 }
 
@@ -183,16 +164,12 @@ void MergeShortEdge::buildTopologyMap()
 {
     vertexEdgeMap_.Clear();
     edgeFaceMap_.Clear();
-
-    TopoDS_Compound compound;
-    BRep_Builder builder;
-    builder.MakeCompound(compound);
-    for (const auto& shape : inputShapes_) {
-        builder.Add(compound, shape);
+    if (inputShape_.IsNull()) {
+        return;
     }
 
-    TopologyUtils::BuildVertexEdgeMap(compound, vertexEdgeMap_);
-    TopExp::MapShapesAndAncestors(compound, TopAbs_EDGE, TopAbs_FACE, edgeFaceMap_);
+    TopologyUtils::BuildVertexEdgeMap(inputShape_, vertexEdgeMap_);
+    TopExp::MapShapesAndAncestors(inputShape_, TopAbs_EDGE, TopAbs_FACE, edgeFaceMap_);
 }
 
 bool MergeShortEdge::refreshLengthThreshold()
@@ -570,14 +547,17 @@ std::vector<TopoDS_Edge> MergeShortEdge::getShortEdges()
 
 void MergeShortEdge::collectAllEdges()
 {
+    allEdges_.clear();
+    if (inputShape_.IsNull()) {
+        return;
+    }
+
     TopTools_MapOfShape addedEdges;
 
-    for (const auto& shape : inputShapes_) {
-        for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next()) {
-            const TopoDS_Edge currentEdge = TopoDS::Edge(exp.Current());
-            if (addedEdges.Add(currentEdge)) {
-                allEdges_.push_back(currentEdge);
-            }
+    for (TopExp_Explorer exp(inputShape_, TopAbs_EDGE); exp.More(); exp.Next()) {
+        const TopoDS_Edge currentEdge = TopoDS::Edge(exp.Current());
+        if (addedEdges.Add(currentEdge)) {
+            allEdges_.push_back(currentEdge);
         }
     }
 }
@@ -698,7 +678,7 @@ void MergeShortEdge::detectShortEdges()
 {
     shortEdges_.clear();
 
-    if (inputShapes_.empty()) {
+    if (inputShape_.IsNull()) {
         return;
     }
 
@@ -743,40 +723,10 @@ TopoDS_Shape MergeShortEdge::preprocessWithShapeFixWireframe(const TopoDS_Shape&
     return fixedShape.IsNull() ? shape : fixedShape;
 }
 
-TopoDS_Shape MergeShortEdge::preprocessInputShape(const TopoDS_Shape& shape) const
-{
-    if (shape.IsNull()) {
-        return shape;
-    }
-
-    TopoDS_Shape preprocessed = preprocessWithShapeFixWireframe(shape);
-    if (preprocessed.IsNull()) {
-        preprocessed = shape;
-    }
-
-    TopoDS_Shape unified = executeUnifySameDomain(preprocessed);
-    if (unified.IsNull()) {
-        return preprocessed;
-    }
-
-    return unified;
-}
-
-TopoDS_Shape MergeShortEdge::executeUnifySameDomain(const TopoDS_Shape& shape) const
-{
-    if (shape.IsNull()) {
-        return shape;
-    }
-
-    ShapeUpgrade_UnifySameDomain unifier(shape, Standard_True, Standard_True, Standard_False);
-    unifier.Build();
-    return unifier.Shape();
-}
-
 std::vector<MergeCandidate> MergeShortEdge::findMergeCandidates()
 {
     mergeCandidates_.clear();
-    if (inputShapes_.empty()) {
+    if (inputShape_.IsNull()) {
         return mergeCandidates_;
     }
 
@@ -822,26 +772,15 @@ std::vector<MergeCandidate> MergeShortEdge::findMergeCandidates()
 
 int MergeShortEdge::performMerge()
 {
-    if (inputShapes_.empty()) {
+    if (inputShape_.IsNull()) {
         return 0;
     }
 
-    if (inputShapes_.size() == 1) {
-        resultShape_ = preprocessInputShape(inputShapes_[0]);
-    }
-    else {
-        BRep_Builder builder;
-        TopoDS_Compound initialCompound;
-        builder.MakeCompound(initialCompound);
-        for (const auto& shape : inputShapes_) {
-            builder.Add(initialCompound, shape);
-        }
-        resultShape_ = preprocessInputShape(initialCompound);
-    }
+    //resultShape_ = inputShape_;
+    //resultShape_ = preprocessWithShapeFixWireframe(inputShape_);
+    //inputShape_ = resultShape_;
     int mergeCount = 0;
 
-    /*inputShapes_.clear();
-    inputShapes_.push_back(resultShape_);
     refreshLengthThreshold();
     allEdges_.clear();
     shortEdges_.clear();
@@ -855,7 +794,7 @@ int MergeShortEdge::performMerge()
     }
 
     const std::vector<std::vector<MergeCandidate>> candidateBatches = buildCandidateBatches(mergeCandidates_);
-    TopoDS_Shape currentShape = resultShape_;
+    TopoDS_Shape currentShape = inputShape_;
 
     for (const auto& batch : candidateBatches) {
         TopoDS_Shape committedShape;
@@ -869,13 +808,12 @@ int MergeShortEdge::performMerge()
     }
 
     resultShape_ = currentShape;
-    inputShapes_.clear();
-    inputShapes_.push_back(resultShape_);
+    inputShape_ = resultShape_;
     shortEdges_.clear();
     mergeCandidates_.clear();
     vertexEdgeMap_.Clear();
     edgeFaceMap_.Clear();
-    refreshLengthThreshold();*/
+    refreshLengthThreshold();
 
     return mergeCount;
 }
@@ -1179,7 +1117,7 @@ TopoDS_Vertex MergeShortEdge::getOtherVertex(const TopoDS_Edge& edge, const Topo
 
 bool MergeShortEdge::setLengthThresholdByBoundingBox(double ratio)
 {
-    if (inputShapes_.empty() || ratio <= 0.0) {
+    if (inputShape_.IsNull() || ratio <= 0.0) {
         return false;
     }
 
@@ -1187,7 +1125,7 @@ bool MergeShortEdge::setLengthThresholdByBoundingBox(double ratio)
         ratio = 0.01;
     }
 
-    const double diagonal = GeometryUtils::ComputeBoundingBoxDiagonal(inputShapes_);
+    const double diagonal = GeometryUtils::ComputeBoundingBoxDiagonal(inputShape_);
     if (diagonal <= 0.0) {
         return false;
     }
@@ -1200,14 +1138,14 @@ bool MergeShortEdge::setLengthThresholdByBoundingBox(double ratio)
 
 bool MergeShortEdge::setLengthThresholdHybrid()
 {
-    if (inputShapes_.empty()) {
+    if (inputShape_.IsNull()) {
         return false;
     }
 
     const double statThreshold = computeStatisticBasedLengthThreshold();
     double bboxThreshold = 0.0;
     if (bboxRatio_ > 0.0) {
-        const double diagonal = GeometryUtils::ComputeBoundingBoxDiagonal(inputShapes_);
+        const double diagonal = GeometryUtils::ComputeBoundingBoxDiagonal(inputShape_);
         if (diagonal > 0.0) {
             bboxThreshold = diagonal * std::min(bboxRatio_, 0.01);
         }

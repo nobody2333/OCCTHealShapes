@@ -53,7 +53,6 @@ public:
     MergeShortEdge& operator=(MergeShortEdge&&) = default;
 
     void setInputShape(const TopoDS_Shape& shape);
-    void setInputShapes(const std::vector<TopoDS_Shape>& shapes);
 
     void setLengthThreshold(double threshold) {
         lengthThreshold_ = threshold;
@@ -93,7 +92,7 @@ private:
     double localLengthRatio_; // 混合阈值模式下，短边还必须显著短于其局部邻边。
     ShortEdgeThresholdMode thresholdMode_; // 当前阈值来源：手工指定、包围盒比例或统计+局部混合模式。
 
-    std::vector<TopoDS_Shape> inputShapes_;
+    TopoDS_Shape inputShape_;
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap_;
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap_;
 	std::vector<TopoDS_Edge> allEdges_;
@@ -109,9 +108,7 @@ private:
     PolyCurveEdgeUse makePolyCurveEdgeUse(const TopoDS_Edge& edge, const TopoDS_Vertex& startVertex, const TopoDS_Vertex& endVertex) const;
 
     // 预处理
-    TopoDS_Shape preprocessInputShape(const TopoDS_Shape& shape) const;
     TopoDS_Shape preprocessWithShapeFixWireframe(const TopoDS_Shape& shape) const;
-    TopoDS_Shape executeUnifySameDomain(const TopoDS_Shape& shape) const;
     // 按当前模式刷新有效阈值，避免手工阈值被后续流程隐式覆盖。
     bool refreshLengthThreshold();
     // 从全局边长分布的下尾部估计一个更稳健的自动短边阈值。
@@ -146,7 +143,7 @@ private:
     // 排除不适合合并的侯选边
     bool isHighRiskEdge(const TopoDS_Edge& edge) const;
     bool isShortEdge(const TopoDS_Edge& edge) const;
-    // 找到最佳相邻边
+    // 找到最佳相邻边，与短边相邻度为2且夹角较大的一个
     bool findBestAdjacentEdge(const TopoDS_Edge& shortEdge, TopoDS_Vertex& bestCommonVertex, TopoDS_Edge& bestAdjacentEdge) const;
     void collectAllEdges();
 };

@@ -11,7 +11,6 @@
 
 #include "ApplicationInit.h"
 #include "GeometryUtils.h"
-#include "MergeShortEdge.h"
 #include "TopoTools.h"
 #include "Viewer.h"
 
@@ -75,13 +74,14 @@ void mergeShortEdge(const std::string& fileName) {
     std::string inputFilePath = "./assets/" + fileName + ".stp";
     std::string outputFilePath = "./assets/fixedShortEdge/fixed" + fileName + ".stp";
     ApplicationInit appInit;
-  
+
 	auto t0 = std::chrono::system_clock::now();
     if (!appInit.importStep(inputFilePath)) {
         std::cerr << "Reading file fasiled" << inputFilePath << std::endl;
         return;
     }
-	auto t1 = std::chrono::system_clock::now();
+
+    auto t1 = std::chrono::system_clock::now();
     std::cout << "ReadFile and Transfer cost: "
         << std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count()
         << " s" << std::endl;
@@ -91,32 +91,31 @@ void mergeShortEdge(const std::string& fileName) {
         std::cerr << "Cannot find valid shapes!" << std::endl;
         return;
     }
-    /*std::cout << "Top-level shape count: " << inputShapes.size() << std::endl;
     for (std::size_t i = 0; i < inputShapes.size(); ++i) {
-        std::cout << std::format("  Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
-    }*/
-
-
-    MergeShortEdge shortEdgeMerger;
-    shortEdgeMerger.setInputShapes(inputShapes);
-    /*shortEdgeMerger.setLengthThreshold(0.02);
-	shortEdgeMerger.setAngleThresholdDeg(120.0);*/
-    std::cout << std::format("Merging short edges with length threshold: {} and angle threshold: {} degrees.", shortEdgeMerger.getLengthThreshold(), shortEdgeMerger.getAngleThresholdDeg()) << std::endl;
-
-
-    std::cout << "Merging short edges......" << std::endl;
-    int mergedCount = shortEdgeMerger.performMerge();
-
-    std::cout << std::format("Merged {} edge pairs.", mergedCount) << std::endl;
-    TopoDS_Shape resultShape = shortEdgeMerger.getResultShape();
-
-    if (appInit.exportStep(resultShape, outputFilePath)) {
-        std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+        std::cout << std::format("Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
     }
-    else {
-        std::cerr << "Error: Failed to write STEP file." << std::endl;
+
+
+    const bool useManualLengthThreshold = false;
+    const double manualLengthThreshold = 0.02;
+    const double angleThresholdDeg = 160.0;
+
+
+    
+    std::cout << "Merging short edges......" << std::endl;
+    int mergedCount = 0;
+    mergedCount = appInit.mergeShortEdgesOnLowestContainersAndExport(outputFilePath,
+                                                                               useManualLengthThreshold,
+                                                                               manualLengthThreshold,
+                                                                               angleThresholdDeg);
+    if (mergedCount < 0) {
+        std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
         return;
     }
+    std::cout << "Merged short-edge candidate count: " << mergedCount << std::endl;
+
+
+    std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
 	auto t2 = std::chrono::system_clock::now();
     std::cout << "Total cost: "
         << std::chrono::duration_cast<std::chrono::seconds>(t2 - t0).count()
@@ -128,7 +127,7 @@ void mergeShortEdge(const std::string& fileName) {
 
 int main()
 {
-    std::string fileName = "F003-CarAircon-model1";
+    std::string fileName = "dumper truck";
     //modelConvert(fileName);
 	mergeShortEdge(fileName);
     return 0;
