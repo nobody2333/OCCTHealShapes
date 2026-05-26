@@ -12,7 +12,6 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
 
-
 class Geom_Curve;
 
 struct PolyCurveEdgeUse {

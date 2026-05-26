@@ -2,15 +2,22 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepLib.hxx>
 #include <TopExp.hxx>
+#include <TopoDS.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <Extrema_ExtPC.hxx>
+#include <Geom2d_Curve.hxx>
 #include <gp_Vec.hxx>
 #include <gp_Pnt.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Edge.hxx>
 #include <Bnd_Box.hxx>
+#include <Precision.hxx>
+#include <ShapeFix_Edge.hxx>
+#include <Standard_Failure.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 
 #include <stdexcept>
 #include <cmath>
@@ -130,4 +137,97 @@ double GeometryUtils::ComputeBoundingBoxDiagonal(const std::vector<TopoDS_Shape>
     gp_Pnt maxCorner = bbox.CornerMax();
 
     return minCorner.Distance(maxCorner);
+}
+
+bool GeometryUtils::HasValidPCurveOnFace(const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    if (edge.IsNull() || face.IsNull()) {
+        return false;
+    }
+
+    try {
+        Standard_Real first = 0.0;
+        Standard_Real last = 0.0;
+        Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+        return !pcurve.IsNull();
+    }
+    catch (Standard_Failure&) {
+        return false;
+    }
+}
+
+bool GeometryUtils::RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
+                                              const TopoDS_Face& face,
+                                              double tolerance,
+                                              std::string* errorMessage)
+{
+    if (edge.IsNull() || face.IsNull()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "edge or face is null";
+        }
+        return false;
+    }
+
+    const double safeTolerance = std::max(tolerance, Precision::Confusion());
+
+    try {
+        if (!HasValidPCurveOnFace(edge, face)) {
+            ShapeFix_Edge edgeFix;
+            const Standard_Boolean isSeam = BRep_Tool::IsClosed(edge, face);
+            edgeFix.FixAddPCurve(edge, face, isSeam, safeTolerance);
+        }
+
+        ShapeFix_Edge edgeFix;
+        edgeFix.FixReversed2d(edge, face);
+        edgeFix.FixSameParameter(edge, face, safeTolerance);
+        edgeFix.FixVertexTolerance(edge, face);
+        BRepLib::SameParameter(edge, safeTolerance);
+    }
+    catch (Standard_Failure& failure) {
+        if (errorMessage != nullptr) {
+            const Standard_CString message = failure.GetMessageString();
+            *errorMessage = message != nullptr ? message : "pcurve repair failed";
+        }
+        return false;
+    }
+
+    if (!HasValidPCurveOnFace(edge, face)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "pcurve still missing after repair";
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool GeometryUtils::RepairPCurvesForEdge(TopoDS_Edge& edge,
+                                         const TopTools_ListOfShape& faces,
+                                         double tolerance,
+                                         std::string* errorMessage)
+{
+    if (edge.IsNull()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "edge is null";
+        }
+        return false;
+    }
+
+    bool allFacesValid = true;
+    for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Value());
+        if (face.IsNull()) {
+            continue;
+        }
+
+        std::string localError;
+        if (!RepairPCurveForEdgeOnFace(edge, face, tolerance, &localError)) {
+            allFacesValid = false;
+            if (errorMessage != nullptr && errorMessage->empty()) {
+                *errorMessage = localError;
+            }
+        }
+    }
+
+    return allFacesValid;
 }

@@ -1,33 +1,70 @@
-#include "TopologyUtils.h"
+ï»¿#include "TopologyUtils.h"
 
-void TopologyUtils::BuildVertexEdgeMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map) {
+#include <TopAbs.hxx>
+#include <TopExp.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
+
+void TopologyUtils::BuildVertexEdgeMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map)
+{
     map.Clear();
+    if (shape.IsNull()) {
+        return;
+    }
 
     TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, map);
+    RemoveDuplicateAncestors(map);
+}
 
+void TopologyUtils::BuildEdgeFaceMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map)
+{
+    map.Clear();
+    if (shape.IsNull()) {
+        return;
+    }
+
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, map);
+    RemoveDuplicateAncestors(map);
+}
+
+int TopologyUtils::GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map)
+{
+    if (map.Contains(vertex)) {
+        return map.FindFromKey(vertex).Extent();
+    }
+    return 0;
+}
+
+int TopologyUtils::CountFreeEdges(const TopoDS_Shape& shape)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    BuildEdgeFaceMap(shape, edgeFaceMap);
+
+    int count = 0;
+    for (int i = 1; i <= edgeFaceMap.Extent(); ++i) {
+        if (edgeFaceMap.FindFromIndex(i).Extent() <= 1) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void TopologyUtils::RemoveDuplicateAncestors(TopTools_IndexedDataMapOfShapeListOfShape& map)
+{
     for (int i = 1; i <= map.Extent(); ++i) {
-        //Ê¹ÓÃ ChangeFromIndex »ñÈ¡Ô­Ê¼ÁÐ±íµÄÔÊÐíÐÞ¸ÄµÄÒýÓÃ
-        TopTools_ListOfShape& originalEdges = map.ChangeFromIndex(i);
+        TopTools_ListOfShape& originalShapes = map.ChangeFromIndex(i);
 
-        TopTools_MapOfShape uniqueEdgeFilter;  //ÀûÓÃ¹þÏ£½øÐÐ¿ìËÙÈ¥ÖØ
-        TopTools_ListOfShape uniqueEdges;      //´æ·ÅÕæÕý²»ÖØ¸´µÄ±ß
+        TopTools_MapOfShape uniqueShapeFilter;
+        TopTools_ListOfShape uniqueShapes;
 
-        //±éÀúµ±Ç°¶¥µãÔ­±¾µÄ±ßÁÐ±í
-        for (TopTools_ListIteratorOfListOfShape it(originalEdges); it.More(); it.Next()) {
-            const TopoDS_Shape& edge = it.Value();
-
-            //Èç¹ûÊÇµÚÒ»´ÎÓöµ½Õâ¸öÐÎ×´£¬»á½«Æä¼ÓÈë¹þÏ£±í²¢·µ»Øtrue
-            if (uniqueEdgeFilter.Add(edge)) {
-                uniqueEdges.Append(edge);
+        for (TopTools_ListIteratorOfListOfShape it(originalShapes); it.More(); it.Next()) {
+            const TopoDS_Shape& shape = it.Value();
+            if (uniqueShapeFilter.Add(shape)) {
+                uniqueShapes.Append(shape);
             }
         }
 
-        originalEdges = uniqueEdges;
+        originalShapes = uniqueShapes;
     }
-}
-
-int TopologyUtils::GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map) {
-	if(map.Contains(vertex))
-		return map.FindFromKey(vertex).Extent();
-	return 0;
 }

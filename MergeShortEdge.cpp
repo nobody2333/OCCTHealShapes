@@ -18,6 +18,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <gp_Pnt.hxx>
 #include <TopTools_MapOfShape.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <Geom_Line.hxx>
 #include <GeomLib.hxx>
@@ -312,46 +313,15 @@ bool MergeShortEdge::validateMergedEdgeGeometry(const TopoDS_Edge& edge) const
 
 bool MergeShortEdge::hasValidPCurveOnFace(const TopoDS_Edge& edge, const TopoDS_Face& face) const
 {
-    if (edge.IsNull() || face.IsNull()) {
-        return false;
-    }
-
-    Standard_Real first = 0.0;
-    Standard_Real last = 0.0;
-    Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, first, last);
-    return !pcurve.IsNull();
+    return GeometryUtils::HasValidPCurveOnFace(edge, face);
 }
 
 bool MergeShortEdge::repairPCurvesForEdge(TopoDS_Edge& edge, const TopTools_ListOfShape& faces) const
 {
-    if (edge.IsNull()) {
-        return false;
-    }
-
-    ShapeFix_Edge edgeFix;
-    bool allFacesValid = true;
-
-    for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
-        const TopoDS_Face face = TopoDS::Face(it.Value());
-        if (face.IsNull()) {
-            continue;
-        }
-
-        if (!hasValidPCurveOnFace(edge, face)) {
-            const Standard_Boolean isSeam = BRep_Tool::IsClosed(edge, face);
-            edgeFix.FixAddPCurve(edge, face, isSeam, std::max(BRep_Tool::Tolerance(edge), Precision::Confusion()));
-        }
-
-        edgeFix.FixReversed2d(edge, face);
-        edgeFix.FixSameParameter(edge, face, std::max(BRep_Tool::Tolerance(edge), Precision::Confusion()));
-        edgeFix.FixVertexTolerance(edge, face);
-
-        if (!hasValidPCurveOnFace(edge, face)) {
-            allFacesValid = false;
-        }
-    }
-
-    return allFacesValid;
+    return GeometryUtils::RepairPCurvesForEdge(
+        edge,
+        faces,
+        std::max(BRep_Tool::Tolerance(edge), Precision::Confusion()));
 }
 
 bool MergeShortEdge::repairAffectedPCurves(TopoDS_Shape& shape, std::vector<TopoDS_Edge>& newEdges) const

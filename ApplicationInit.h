@@ -15,6 +15,9 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
 
+#include "MergeShortEdge.h"
+#include "HealNarrowGap.h"
+
 class ApplicationInit {
 public:
     ApplicationInit();
@@ -31,6 +34,8 @@ public:
                                                    bool useManualLengthThreshold,
                                                    double manualLengthThreshold,
                                                    double angleThresholdDeg);
+    int healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
+                                                  const HealNarrowGap::Params& params = HealNarrowGap::Params());
 
     std::vector<TopoDS_Shape> getAllShapes() const;
     std::vector<TopoDS_Solid> getAllSolids() const;

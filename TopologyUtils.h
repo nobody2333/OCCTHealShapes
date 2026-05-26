@@ -1,22 +1,44 @@
-#pragma once
-#include <TopAbs_ShapeEnum.hxx>
+﻿#pragma once
+
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
-#include <TopExp.hxx>
 
 class TopologyUtils {
 public:
-	/// <summary>
-	/// ��������-��ӳ��
-	/// </summary>
-	/// <param name="shape">:��Ҫ������������״</param>
-	/// <param name="map">:������ɵ�ӳ���</param>
-	static void BuildVertexEdgeMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map);
-	/// <summary>
-	/// ��ȡ����Ķ���
-	/// </summary>
-	/// <param name="vertex">:��Ҫ��ȡ�ȵĶ���</param>
-	/// <param name="map">:��ǰ������ӳ���</param>
-	/// <returns></returns>
-	static int GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map);
+    /// <summary>
+    /// 构建 vertex -> adjacent edges 映射，并去除重复 edge。
+    /// </summary>
+    /// <param name="shape">需要构建映射的拓扑形状。</param>
+    /// <param name="map">构建完成的映射表。</param>
+    static void BuildVertexEdgeMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map);
+
+    /// <summary>
+    /// 构建 edge -> adjacent faces 映射，并去除重复 face。
+    /// </summary>
+    /// <param name="shape">需要构建映射的拓扑形状。</param>
+    /// <param name="map">构建完成的映射表。</param>
+    static void BuildEdgeFaceMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map);
+
+    /// <summary>
+    /// 获取顶点连接的唯一 edge 数量。
+    /// </summary>
+    /// <param name="vertex">需要获取度数的顶点。</param>
+    /// <param name="map">先前构建的 vertex -> edge 映射表。</param>
+    /// <returns>顶点度数。</returns>
+    static int GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map);
+
+    /// <summary>
+    /// 统计只被 0 或 1 个 face 使用的 free edge 数量。
+    /// </summary>
+    /// <param name="shape">需要统计的拓扑形状。</param>
+    /// <returns>free edge 数量。</returns>
+    static int CountFreeEdges(const TopoDS_Shape& shape);
+
+private:
+    /// <summary>
+    /// 对 IndexedDataMap 中每个 key 对应的 shape list 做拓扑去重。
+    /// </summary>
+    static void RemoveDuplicateAncestors(TopTools_IndexedDataMapOfShapeListOfShape& map);
 };

@@ -21,7 +21,6 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
-#include "MergeShortEdge.h"
 
 namespace {
     std::string normalizeStepLengthUnit(const TCollection_AsciiString& unitName)
@@ -286,6 +285,84 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
     }
 
     return mergedCount;
+}
+
+int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
+                                                               const HealNarrowGap::Params& params)
+{
+    if (aDoc_.IsNull()) {
+        std::cerr << "Error: Cannot heal narrow gaps because the XCAF document is null." << std::endl;
+        return 0;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) {
+        std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        return 0;
+    }
+
+    std::vector<EditableContainerTarget> targets;
+    collectTopLevelTargets(targets);
+    if (targets.empty()) {
+        std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        return 0;
+    }
+
+    int repairedCount = 0;
+    int replacedCount = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const EditableContainerTarget& target = targets[i];
+        if (target.ownerLabel.IsNull()) {
+            std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            continue;
+        }
+
+        const TopoDS_Shape currentShape = shapeTool->GetShape(target.ownerLabel);
+        const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
+        if (originalShape.IsNull()) {
+            std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            continue;
+        }
+
+        HealNarrowGap narrowGapHealer(params);
+        narrowGapHealer.setInputShape(originalShape);
+        const int containerRepairedCount = narrowGapHealer.Perform();
+
+        TopoDS_Shape processedShape = narrowGapHealer.getResultShape();
+        if (processedShape.IsNull()) {
+            std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            continue;
+        }
+
+        if (processedShape.ShapeType() != originalShape.ShapeType()) {
+            std::cerr << "Container " << i << " changed shape type from "
+                      << static_cast<int>(originalShape.ShapeType()) << " to "
+                      << static_cast<int>(processedShape.ShapeType())
+                      << ", keep original shape." << std::endl;
+            continue;
+        }
+
+        if (!narrowGapHealer.isModified()) {
+            continue;
+        }
+
+        shapeTool->SetShape(target.ownerLabel, processedShape);
+        repairedCount += containerRepairedCount;
+        ++replacedCount;
+
+        for (const std::string& message : narrowGapHealer.getMessages()) {
+            std::cout << "[HealNarrowGap] Container " << i << ": " << message << std::endl;
+        }
+    }
+
+    shapeTool->UpdateAssemblies();
+    refreshShapeCache();
+    std::cout << "Replaced lowest containers after narrow-gap heal: " << replacedCount << std::endl;
+    if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        return -1;
+    }
+
+    return repairedCount;
 }
 
 bool ApplicationInit::writeXcafDocumentStep(const Handle(TDocStd_Document)& doc,

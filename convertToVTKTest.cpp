@@ -4,6 +4,7 @@
 #include <format>
 #include <chrono>
 #include <iostream>
+#include <filesystem>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
@@ -123,12 +124,57 @@ void mergeShortEdge(const std::string& fileName) {
     return;
 }
 
+int healNarrowGap(const std::string& fileName) {
+    std::string inputFilePath = "./assets/" + fileName + ".stp";
+    std::filesystem::create_directories("./assets/fixedNarrowGap");
+    std::string outputFilePath = "./assets/fixedNarrowGap/fixed" + fileName + ".stp";
+    ApplicationInit appInit;
 
+    auto t0 = std::chrono::system_clock::now();
+    if (!appInit.importStep(inputFilePath)) {
+        std::cerr << "Reading file failed: " << inputFilePath << std::endl;
+        return -1;
+    }
+
+    auto t1 = std::chrono::system_clock::now();
+    std::cout << "ReadFile and Transfer cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count()
+        << " s" << std::endl;
+
+    std::vector<TopoDS_Shape> inputShapes = appInit.getAllShapes();
+    if (inputShapes.empty()) {
+        std::cerr << "Cannot find valid shapes!" << std::endl;
+        return -1;
+    }
+    for (std::size_t i = 0; i < inputShapes.size(); ++i) {
+        std::cout << std::format("Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
+    }
+
+    HealNarrowGap::Params params;
+
+    std::cout << "Healing narrow gaps......" << std::endl;
+    const int repairedCount = appInit.healNarrowGapsOnLowestContainersAndExport(outputFilePath, params);
+    if (repairedCount < 0) {
+        std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
+        return -1;
+    }
+
+    std::cout << "Repaired narrow-gap candidate count: " << repairedCount << std::endl;
+    std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+
+    auto t2 = std::chrono::system_clock::now();
+    std::cout << "Total cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t2 - t0).count()
+        << " s" << std::endl;
+
+    return repairedCount;
+}
 
 int main()
 {
-    std::string fileName = "dumper truck";
+    std::string fileName = "h6k";
     //modelConvert(fileName);
-	mergeShortEdge(fileName);
+	//mergeShortEdge(fileName);
+    healNarrowGap(fileName);
     return 0;
 }
