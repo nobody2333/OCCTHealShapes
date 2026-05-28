@@ -35,6 +35,10 @@ public:
 	/// 判断边在指定面上是否已有可用 pcurve。
 	/// </summary>
 	static bool HasValidPCurveOnFace(const TopoDS_Edge& edge, const TopoDS_Face& face);
+	static bool HasValidPCurveOnFace(const TopoDS_Edge& edge,
+	                                 const TopoDS_Face& face,
+	                                 double tolerance,
+	                                 std::string* errorMessage = nullptr);
 
 	/// <summary>
 	/// 为边在指定面上补建并校验 pcurve，同时修正 2D 方向和 same-parameter。

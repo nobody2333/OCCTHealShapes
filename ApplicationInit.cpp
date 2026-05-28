@@ -1,6 +1,8 @@
 #include "ApplicationInit.h"
 
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <IGESCAFControl_Reader.hxx>
 #include <IGESData_BasicEditor.hxx>
@@ -290,6 +292,20 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
 int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
                                                                const HealNarrowGap::Params& params)
 {
+    const std::filesystem::path healLogPath = std::filesystem::path("assets") / "fixedNarrowGap" / "HealGapsLog.txt";
+    std::filesystem::create_directories(healLogPath.parent_path());
+    {
+        std::ofstream logFile(healLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "HealNarrowGap log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open HealNarrowGap log file: "
+                      << healLogPath.string() << std::endl;
+        }
+    }
+
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot heal narrow gaps because the XCAF document is null." << std::endl;
         return 0;
@@ -328,6 +344,30 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
         narrowGapHealer.setInputShape(originalShape);
         const int containerRepairedCount = narrowGapHealer.Perform();
 
+        {
+            std::ofstream logFile(healLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[HealNarrowGap] Container " << i
+                        << ", repairedCount=" << containerRepairedCount
+                        << ", modified=" << (narrowGapHealer.isModified() ? "true" : "false")
+					    << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = narrowGapHealer.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+                logFile << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append HealNarrowGap log file: "
+                          << healLogPath.string() << std::endl;
+            }
+        }
+
         TopoDS_Shape processedShape = narrowGapHealer.getResultShape();
         if (processedShape.IsNull()) {
             std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
@@ -350,9 +390,6 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
         repairedCount += containerRepairedCount;
         ++replacedCount;
 
-        for (const std::string& message : narrowGapHealer.getMessages()) {
-            std::cout << "[HealNarrowGap] Container " << i << ": " << message << std::endl;
-        }
     }
 
     shapeTool->UpdateAssemblies();

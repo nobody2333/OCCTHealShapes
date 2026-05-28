@@ -161,15 +161,24 @@ private:
         std::string& errorMessage) const;
 
     // 在 oldFace 的 wire 中查找 oldEdge 的实际 edge use。
-    bool FindOldEdgeInWire(
+    bool FindEdgeUseInFaceWire(
         const TopoDS_Face& oldFace,
         const TopoDS_Edge& oldEdge,
         TopoDS_Edge& oldEdgeInWire,
         std::string& errorMessage) const;
 
+    // 重建 faceToRebuild 的边界，用 replacementEdgeUse 替换 edgeToReplace。
+    bool RebuildFaceReplacingEdge(
+        const TopoDS_Face& faceToRebuild,
+        const TopoDS_Edge& edgeToReplace,
+        const TopoDS_Edge& replacementEdgeUse,
+        double tol,
+        TopoDS_Face& rebuiltFace,
+        std::string& errorMessage) const;
+
     // 确保 edge 在 face 的 surface 上有可用 pcurve。
     bool EnsurePCurveOnFace(
-        const TopoDS_Edge& edge,
+        TopoDS_Edge& edge,
         const TopoDS_Face& face,
         double tol,
         std::string& errorMessage) const;

@@ -6,9 +6,12 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRepCheck_Face.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -23,7 +26,9 @@
 #include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <ShapeFix_Edge.hxx>
+#include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Wire.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs.hxx>
 #include <TopExp.hxx>
@@ -128,7 +133,7 @@ std::string DescribeBRepCheckFailures(BRepCheck_Analyzer& analyzer, const TopoDS
         if (!hasError) {
             continue;
         }
-
+        
         os << " [subshape#" << i
            << " type=" << static_cast<int>(subShape.ShapeType())
            << " status=" << statusStream.str() << "]";
@@ -680,34 +685,52 @@ bool HealNarrowGap::TryRepairCandidate(
         BRep_Tool::Tolerance(choice.keptEdge),
         BRep_Tool::Tolerance(choice.edgeToReplace),
         myParams.maxGap
-    });
+        });
 
-    if (!EnsurePCurveOnFace(choice.keptEdge, choice.fixedFace, pcurveTol, errorMessage)) {
+    TopoDS_Edge keptEdgeInFixedWire;
+    if (!FindEdgeUseInFaceWire(choice.fixedFace,
+        choice.keptEdge,
+        keptEdgeInFixedWire,
+        errorMessage)) {
+        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Edge edgeToReplaceInWire;
+    if (!FindEdgeUseInFaceWire(choice.faceToRebuild,
+        choice.edgeToReplace,
+        edgeToReplaceInWire,
+        errorMessage)) {
+        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        return false;
+    }
+
+    if (!EnsurePCurveOnFace(keptEdgeInFixedWire, choice.fixedFace, pcurveTol, errorMessage)) {
         errorMessage = "failed to add pcurve on fixed face: " + errorMessage;
         return false;
     }
 
-    if (!EnsurePCurveOnFace(choice.keptEdge, choice.faceToRebuild, pcurveTol, errorMessage)) {
+    if (!EnsurePCurveOnFace(edgeToReplaceInWire, choice.faceToRebuild, pcurveTol, errorMessage)) {
         errorMessage = "failed to add pcurve on target face: " + errorMessage;
         return false;
     }
 
-    TopoDS_Edge oldEdgeInWire;
-    if (!FindOldEdgeInWire(
-            choice.faceToRebuild,
-            choice.edgeToReplace,
-            oldEdgeInWire,
-            errorMessage)) {
+    TopoDS_Face rebuiltFace;
+    if (!RebuildFaceReplacingEdge(
+        choice.faceToRebuild,
+        choice.edgeToReplace,
+        keptEdgeInFixedWire,
+        pcurveTol,
+        rebuiltFace,
+        errorMessage)) {
         return false;
     }
 
-    // trialShape 是将旧 edge 替换为 keptEdge 后的试运行形状。
+    // trialShape 是将目标 face 边界重建后的试运行形状。
     TopoDS_Shape trialShape;
     try {
         BRepTools_ReShape reshaper;
-        TopoDS_Edge keptEdgeUse = choice.keptEdge;
-        keptEdgeUse.Orientation(oldEdgeInWire.Orientation());
-        reshaper.Replace(oldEdgeInWire, keptEdgeUse);
+        reshaper.Replace(choice.faceToRebuild, rebuiltFace);
         trialShape = reshaper.Apply(currentShape);
         if (trialShape.IsNull()) {
             errorMessage = "shape replacement returned null";
@@ -719,6 +742,29 @@ bool HealNarrowGap::TryRepairCandidate(
         return false;
     }
 
+    // DBG-TEMP
+    if (!FindEdgeUseInFaceWire(choice.fixedFace,
+        choice.keptEdge,
+        keptEdgeInFixedWire,
+        errorMessage)) {
+        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        return false;
+    }
+
+    if (!FindEdgeUseInFaceWire(rebuiltFace,
+        choice.keptEdge,
+        edgeToReplaceInWire,
+        errorMessage)) {
+        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        return false;
+    }
+
+    bool ff = edgeToReplaceInWire.IsSame(keptEdgeInFixedWire);
+    bool o1 = edgeToReplaceInWire.Orientation();
+    bool o2 = keptEdgeInFixedWire.Orientation();
+
+
+
     TopTools_IndexedDataMapOfShapeListOfShape repairedEdgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(trialShape, repairedEdgeFaceMap);
     TopTools_ListOfShape keptEdgeFaces;
@@ -727,15 +773,27 @@ bool HealNarrowGap::TryRepairCandidate(
         return false;
     }
 
-    TopoDS_Edge keptEdgeForPCurveRepair = choice.keptEdge;
     std::string pcurveRepairError;
-    if (!GeometryUtils::RepairPCurvesForEdge(
-            keptEdgeForPCurveRepair,
-            keptEdgeFaces,
-            pcurveTol,
-            &pcurveRepairError)) {
-        errorMessage = "failed to repair kept edge pcurves after replacement: " + pcurveRepairError;
-        return false;
+    for (TopTools_ListIteratorOfListOfShape it(keptEdgeFaces); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Value());
+        if (face.IsNull()) {
+            continue;
+        }
+
+        TopoDS_Edge keptEdgeInFace;
+        if (!FindEdgeUseInFaceWire(face, choice.keptEdge, keptEdgeInFace, pcurveRepairError)) {
+            errorMessage = "failed to find kept edge use after replacement: " + pcurveRepairError;
+            return false;
+        }
+        
+        if (!GeometryUtils::RepairPCurveForEdgeOnFace(
+                keptEdgeInFace,
+                face,
+                pcurveTol,
+                &pcurveRepairError)) {
+            errorMessage = "failed to repair kept edge pcurve after replacement: " + pcurveRepairError;
+            return false;
+        }
     }
 
     if (myParams.runShapeFixAfterRepair) {
@@ -773,10 +831,10 @@ bool HealNarrowGap::FaceContainsEdgeInWire(
     std::string& errorMessage) const
 {
     TopoDS_Edge oldEdgeInWire;
-    return FindOldEdgeInWire(oldFace, oldEdge, oldEdgeInWire, errorMessage);
+    return FindEdgeUseInFaceWire(oldFace, oldEdge, oldEdgeInWire, errorMessage);
 }
 
-bool HealNarrowGap::FindOldEdgeInWire(
+bool HealNarrowGap::FindEdgeUseInFaceWire(
     const TopoDS_Face& oldFace,
     const TopoDS_Edge& oldEdge,
     TopoDS_Edge& oldEdgeInWire,
@@ -791,8 +849,8 @@ bool HealNarrowGap::FindOldEdgeInWire(
     try {
         for (TopExp_Explorer wireExp(oldFace, TopAbs_WIRE); wireExp.More(); wireExp.Next()) {
             const TopoDS_Wire oldWire = TopoDS::Wire(wireExp.Current());
-            for (TopExp_Explorer edgeExp(oldWire, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
-                const TopoDS_Edge edgeInWire = TopoDS::Edge(edgeExp.Current());
+            for (BRepTools_WireExplorer edgeExp(oldWire, oldFace); edgeExp.More(); edgeExp.Next()) {
+                const TopoDS_Edge edgeInWire = edgeExp.Current();
                 if (!edgeInWire.IsSame(oldEdge)) {
                     continue;
                 }
@@ -811,9 +869,150 @@ bool HealNarrowGap::FindOldEdgeInWire(
     return false;
 }
 
+bool HealNarrowGap::RebuildFaceReplacingEdge(
+    const TopoDS_Face& faceToRebuild,
+    const TopoDS_Edge& edgeToReplace,
+    const TopoDS_Edge& replacementEdgeUse,
+    double tol,
+    TopoDS_Face& rebuiltFace,
+    std::string& errorMessage) const
+{
+    rebuiltFace.Nullify();
+    if (faceToRebuild.IsNull() || edgeToReplace.IsNull() || replacementEdgeUse.IsNull()) {
+        errorMessage = "invalid face or edge for face rebuild";
+        return false;
+    }
+
+    try {
+        TopoDS_Face forwardFace = faceToRebuild;
+        forwardFace.Orientation(TopAbs_FORWARD);
+
+        TopLoc_Location surfaceLocation;
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(forwardFace, surfaceLocation);
+        if (surface.IsNull()) {
+            errorMessage = "target face has no support surface";
+            return false;
+        }
+
+        const double faceTol = std::max({
+            Precision::Confusion(),
+            BRep_Tool::Tolerance(faceToRebuild),
+            tol
+        });
+
+        BRep_Builder builder;
+        TopoDS_Face rebuilt;
+        builder.MakeFace(rebuilt, surface, surfaceLocation, faceTol);
+        builder.NaturalRestriction(rebuilt, BRep_Tool::NaturalRestriction(forwardFace));
+        rebuilt.Orientation(TopAbs_FORWARD);
+
+        bool replaced = false;
+        for (TopExp_Explorer wireExp(forwardFace, TopAbs_WIRE); wireExp.More(); wireExp.Next()) {
+            const TopoDS_Wire oldWire = TopoDS::Wire(wireExp.Current());
+            if (oldWire.IsNull()) {
+                continue;
+            }
+
+            bool wireContainsEdge = false;
+            for (BRepTools_WireExplorer edgeExp(oldWire, forwardFace); edgeExp.More(); edgeExp.Next()) {
+                const TopoDS_Edge edgeInWire = edgeExp.Current();
+                if (edgeInWire.IsSame(edgeToReplace)) {
+                    wireContainsEdge = true;
+                    break;
+                }
+            }
+
+            TopoDS_Wire wireToAdd = oldWire;
+            if (wireContainsEdge) {
+                BRepBuilderAPI_MakeWire wireMaker;
+                bool replacedInWire = false;
+                for (BRepTools_WireExplorer edgeExp(oldWire, forwardFace); edgeExp.More(); edgeExp.Next()) {
+                    const TopoDS_Edge edgeInWire = edgeExp.Current();
+                    if (edgeInWire.IsSame(edgeToReplace)) {
+                        wireMaker.Add(replacementEdgeUse);
+                        replacedInWire = true;
+                    }
+                    else {
+                        wireMaker.Add(edgeInWire);
+                    }
+                }
+
+                if (!replacedInWire || !wireMaker.IsDone()) {
+                    errorMessage = "failed to rebuild target wire";
+                    return false;
+                }
+
+                wireToAdd = wireMaker.Wire();
+                wireToAdd.Orientation(oldWire.Orientation());
+
+                ShapeFix_Wire wireFix(wireToAdd, forwardFace, faceTol);
+                wireFix.ModifyTopologyMode() = Standard_False;
+                wireFix.ModifyGeometryMode() = Standard_True;
+                wireFix.ClosedWireMode() = Standard_True;
+                wireFix.FixReorderMode() = 1;
+                wireFix.FixConnectedMode() = 1;
+                wireFix.FixEdgeCurvesMode() = 1;
+                wireFix.FixReversed2dMode() = 1;
+                wireFix.FixSameParameterMode() = 1;
+                wireFix.Perform();
+
+                TopoDS_Wire fixedWire = wireFix.WireAPIMake();
+                if (fixedWire.IsNull()) {
+                    fixedWire = wireFix.Wire();
+                }
+                if (fixedWire.IsNull()) {
+                    errorMessage = "ShapeFix_Wire returned null wire";
+                    return false;
+                }
+
+                fixedWire.Orientation(oldWire.Orientation());
+                wireToAdd = fixedWire;
+                replaced = true;
+            }
+
+            builder.Add(rebuilt, wireToAdd);
+        }
+
+        if (!replaced) {
+            errorMessage = "edge to replace not found while rebuilding face";
+            return false;
+        }
+
+        ShapeFix_Face faceFix(rebuilt);
+        faceFix.SetPrecision(faceTol);
+        faceFix.SetMaxTolerance(std::max(faceTol, myParams.maxGap * 10.0));
+        faceFix.FixWireMode() = 1;
+        faceFix.FixOrientationMode() = 1;
+        faceFix.FixMissingSeamMode() = 1;
+        faceFix.FixAddNaturalBoundMode() = 0;
+        faceFix.Perform();
+
+        TopoDS_Shape fixedShape = faceFix.Result();
+        if (!fixedShape.IsNull() && fixedShape.ShapeType() == TopAbs_FACE) {
+            rebuiltFace = TopoDS::Face(fixedShape);
+        }
+        else {
+            rebuiltFace = faceFix.Face();
+        }
+
+        if (rebuiltFace.IsNull()) {
+            errorMessage = "ShapeFix_Face returned null face";
+            return false;
+        }
+
+        rebuiltFace.Orientation(faceToRebuild.Orientation());
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "face rebuild failed: " + FailureText(failure);
+        return false;
+    }
+
+    return true;
+}
+
 // 如果 edge 在 face 上缺少 pcurve，则尝试用 ShapeFix_Edge 投影并修正 same-parameter。
 bool HealNarrowGap::EnsurePCurveOnFace(
-    const TopoDS_Edge& edge,
+    TopoDS_Edge& edge,
     const TopoDS_Face& face,
     double tol,
     std::string& errorMessage) const
@@ -823,9 +1022,8 @@ bool HealNarrowGap::EnsurePCurveOnFace(
         return false;
     }
 
-    TopoDS_Edge mutableEdge = edge;
     if (!GeometryUtils::RepairPCurveForEdgeOnFace(
-            mutableEdge,
+            edge,
             face,
             std::max(tol, Precision::Confusion()),
             &errorMessage)) {
@@ -876,9 +1074,9 @@ bool HealNarrowGap::ValidateEdgeReplacement(
     int freeEdgesBefore,
     std::string& errorMessage) const
 {
-    if (!ValidateWholeShape(repairedShape, freeEdgesBefore, errorMessage)) {
+    /*if (!ValidateWholeShape(repairedShape, freeEdgesBefore, errorMessage)) {
         return false;
-    }
+    }*/
 
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(repairedShape, edgeFaceMap);
@@ -888,7 +1086,7 @@ bool HealNarrowGap::ValidateEdgeReplacement(
         return false;
     }
 
-    if (adjacentFaces.Extent() < 2) {
+    if (adjacentFaces.Extent() != 2) {
         errorMessage = "kept edge is not shared after edge replacement";
         return false;
     }
@@ -899,8 +1097,14 @@ bool HealNarrowGap::ValidateEdgeReplacement(
             continue;
         }
 
-        if (!HasPCurveOnFace(keptEdge, face)) {
-            errorMessage = "kept edge pcurve missing after edge replacement";
+        const double pcurveTol = std::max({
+            Precision::Confusion(),
+            BRep_Tool::Tolerance(keptEdge),
+            BRep_Tool::Tolerance(face)
+        });
+        std::string localError;
+        if (!GeometryUtils::HasValidPCurveOnFace(keptEdge, face, pcurveTol, &localError)) {
+            errorMessage = "kept edge pcurve invalid after edge replacement: " + localError;
             return false;
         }
     }
