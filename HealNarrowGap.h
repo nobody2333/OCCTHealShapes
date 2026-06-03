@@ -24,8 +24,6 @@ public:
         double minLengthRatio = 0.9;
         // 沿 3D 曲线同步采样的点数。
         int sampleCount = 20;
-        // 每次只提交一个候选，最多迭代的提交次数。
-        int maxIterations = 100;
         // 为 true 时，在容差不明显更优的情况下优先保留较长边。
         bool preferLongerEdgeToKeep = true;
         // 为 true 时，单次局部替换校验通过后再运行 ShapeFix_Shape。
@@ -148,11 +146,11 @@ private:
     EdgeChoice ChooseEdgeToKeep(const Candidate& candidate) const;
 
     // 尝试修复单个候选；失败时不修改 currentShape，由调用方尝试下一个候选。
-    bool TryRepairCandidate(
+    bool tryRepairCandidate(
         const TopoDS_Shape& currentShape,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
-        std::string& errorMessage) const;
+        std::string& errorMessage);
 
     // 确认 oldEdge 存在于 oldFace 的某条 wire 中。
     bool FaceContainsEdgeInWire(
@@ -168,7 +166,7 @@ private:
         std::string& errorMessage) const;
 
     // 重建 faceToRebuild 的边界，用 replacementEdgeUse 替换 edgeToReplace。
-    bool RebuildFaceReplacingEdge(
+    bool RebuildFaceByReplacingEdge(
         const TopoDS_Face& faceToRebuild,
         const TopoDS_Edge& edgeToReplace,
         const TopoDS_Edge& replacementEdgeUse,
@@ -185,12 +183,14 @@ private:
 
     // 校验替换后的整体 shape 有效，且 free edge 数量没有增加。
     bool ValidateWholeShape(
+        const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& repairedShape,
         int freeEdgesBefore,
         std::string& errorMessage) const;
 
     // 校验 edge 级替换后 keptEdge 已经被多个 face 共享，并且 pcurve 可用。
     bool ValidateEdgeReplacement(
+        const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& repairedShape,
         const TopoDS_Edge& keptEdge,
         int freeEdgesBefore,

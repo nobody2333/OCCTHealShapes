@@ -40,6 +40,23 @@
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 
 namespace {
+constexpr int kMaxAutomaticRepairIterations = 1000;
+
+int ComputeAutomaticRepairIterationLimit(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return 1;
+    }
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(shape, edgeFaceMap);
+    if (edgeFaceMap.Extent() <= 0) {
+        return 1;
+    }
+
+    return std::min(edgeFaceMap.Extent(), kMaxAutomaticRepairIterations);
+}
+
 // 将评分项限制在 [0, 1]，避免异常参数影响综合置信度。
 double Clamp01(double value)
 {
@@ -147,6 +164,122 @@ std::string DescribeBRepCheckFailures(BRepCheck_Analyzer& analyzer, const TopoDS
     return os.str();
 }
 
+struct BRepCheckFailureInfo {
+    TopoDS_Shape shape;
+    TopAbs_ShapeEnum type = TopAbs_SHAPE;
+    std::vector<BRepCheck_Status> statuses;
+};
+
+bool ContainsStatus(const std::vector<BRepCheck_Status>& statuses, BRepCheck_Status status)
+{
+    return std::find(statuses.begin(), statuses.end(), status) != statuses.end();
+}
+
+bool StatusesAreSubset(
+    const std::vector<BRepCheck_Status>& statuses,
+    const std::vector<BRepCheck_Status>& baselineStatuses)
+{
+    for (const BRepCheck_Status status : statuses) {
+        if (!ContainsStatus(baselineStatuses, status)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<BRepCheckFailureInfo> CollectBRepCheckFailures(
+    const TopoDS_Shape& shape,
+    std::string* errorMessage = nullptr)
+{
+    std::vector<BRepCheckFailureInfo> failures;
+    if (shape.IsNull()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "shape is null";
+        }
+        return failures;
+    }
+
+    try {
+        BRepCheck_Analyzer analyzer(shape, Standard_True);
+        TopTools_IndexedMapOfShape allShapes;
+        TopExp::MapShapes(shape, allShapes);
+
+        for (int i = 1; i <= allShapes.Extent(); ++i) {
+            const TopoDS_Shape& subShape = allShapes.FindKey(i);
+            Handle(BRepCheck_Result) result = analyzer.Result(subShape);
+            if (result.IsNull()) {
+                continue;
+            }
+
+            BRepCheckFailureInfo failure;
+            failure.shape = subShape;
+            failure.type = subShape.ShapeType();
+
+            const BRepCheck_ListOfStatus& statuses = result->Status();
+            for (BRepCheck_ListIteratorOfListOfStatus it(statuses); it.More(); it.Next()) {
+                const BRepCheck_Status status = it.Value();
+                if (status == BRepCheck_NoError || ContainsStatus(failure.statuses, status)) {
+                    continue;
+                }
+                failure.statuses.push_back(status);
+            }
+
+            if (!failure.statuses.empty()) {
+                failures.push_back(failure);
+            }
+        }
+    }
+    catch (Standard_Failure& failure) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "BRepCheck failure collection failed: " + FailureText(failure);
+        }
+    }
+
+    return failures;
+}
+
+bool IsExistingBRepCheckFailure(
+    const BRepCheckFailureInfo& failure,
+    const std::vector<BRepCheckFailureInfo>& baselineFailures)
+{
+    for (const BRepCheckFailureInfo& baseline : baselineFailures) {
+        if (failure.type != baseline.type || !failure.shape.IsSame(baseline.shape)) {
+            continue;
+        }
+
+        if (StatusesAreSubset(failure.statuses, baseline.statuses)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::string DescribeBRepCheckFailureList(const std::vector<BRepCheckFailureInfo>& failures)
+{
+    std::ostringstream os;
+    int reported = 0;
+    constexpr int maxReported = 30;
+    for (const BRepCheckFailureInfo& failure : failures) {
+        if (reported >= maxReported) {
+            os << " ...";
+            break;
+        }
+
+        os << " [type=" << static_cast<int>(failure.type) << " status=";
+        for (std::size_t i = 0; i < failure.statuses.size(); ++i) {
+            if (i > 0) {
+                os << ",";
+            }
+            os << BRepCheckStatusName(failure.statuses[i]);
+        }
+        os << "]";
+        ++reported;
+    }
+
+    return os.str();
+}
+
 bool FindFacesForSameEdge(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
                           const TopoDS_Edge& edge,
                           TopTools_ListOfShape& faces)
@@ -176,7 +309,6 @@ HealNarrowGap::HealNarrowGap(const Params& params)
     : myParams(params)
 {
     myParams.sampleCount = std::max(2, myParams.sampleCount);
-    myParams.maxIterations = std::max(1, myParams.maxIterations);
     myParams.minLengthRatio = Clamp01(myParams.minLengthRatio);
 }
 
@@ -198,16 +330,36 @@ int HealNarrowGap::Perform()
     resultShape_ = inputShape_;
 
     if (inputShape_.IsNull()) {
-        AppendMessage(messages_, "input shape is null");
+        AppendMessage(messages_, "Input shape is null");
         return 0;
     }
 
     // currentShape 是迭代中的工作副本，不直接修改 inputShape。
     TopoDS_Shape currentShape = inputShape_;
-    for (int iter = 0; iter < myParams.maxIterations; ++iter) {
+    const int iterationLimit = ComputeAutomaticRepairIterationLimit(currentShape);
+    {
+        std::ostringstream os;
+        os << "Automatic repair iteration limit = " << iterationLimit;
+        AppendMessage(messages_, os.str());
+    }
+
+    for (int iter = 0; iter < iterationLimit; ++iter) {
         // edgeFaceMap 记录每条 edge 的相邻 face，用于判定单面边和 free edge。
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
+
+        std::string baselineCheckError;
+        const std::vector<BRepCheckFailureInfo> baselineFailures =
+            CollectBRepCheckFailures(currentShape, &baselineCheckError);
+        if (!baselineCheckError.empty()) {
+            AppendMessage(messages_, "Current shape BRepCheck failed: " + baselineCheckError);
+        }
+        else if (!baselineFailures.empty()) {
+            std::ostringstream os;
+            os << "Current shape has existing BRepCheck failures:"
+               << DescribeBRepCheckFailureList(baselineFailures);
+            AppendMessage(messages_, os.str());
+        }
 
         // candidates 是本轮从当前形状重新提取的候选，避免基于过期拓扑批量提交。
         std::vector<Candidate> candidates = ExtractCandidatePairs(currentShape, edgeFaceMap, messages_);
@@ -220,7 +372,7 @@ int HealNarrowGap::Perform()
 
         {
             std::ostringstream os;
-            os << "iteration " << (iter + 1) << ": candidate count = " << candidates.size();
+            os << "Iteration " << (iter + 1) << ": candidate count = " << candidates.size();
             AppendMessage(messages_, os.str());
         }
 
@@ -235,8 +387,8 @@ int HealNarrowGap::Perform()
             TopoDS_Shape repairedShape;
             // errorMessage 记录当前候选失败原因，失败后继续尝试下一候选。
             std::string errorMessage;
-            if (!TryRepairCandidate(currentShape, candidate, repairedShape, errorMessage)) {
-                AppendMessage(messages_, "candidate failed: " + errorMessage);
+            if (!tryRepairCandidate(currentShape, candidate, repairedShape, errorMessage)) {
+                AppendMessage(messages_, "Candidate failed: " + errorMessage);
                 continue;
             }
 
@@ -247,7 +399,7 @@ int HealNarrowGap::Perform()
             repairedThisIteration = true;
 
             std::ostringstream os;
-            os << "repaired candidate: confidence=" << candidate.confidence
+            os << "Repaired candidate: confidence=" << candidate.confidence
                << ", maxGap=" << candidate.maxGap
                << ", meanGap=" << candidate.meanGap
                << ", lengthRatio=" << candidate.lengthRatio
@@ -258,6 +410,10 @@ int HealNarrowGap::Perform()
 
         if (!repairedThisIteration) {
             break;
+        }
+
+        if (iter + 1 == iterationLimit) {
+            AppendMessage(messages_, "Repair stopped: automatic iteration limit reached");
         }
     }
 
@@ -297,12 +453,12 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::ExtractCandidatePairs(
         }
 
         if (IsDegeneratedEdge(edgeA) || IsSeamEdge(edgeA, edgeFaceMap)) {
-            AppendMessage(messages, "candidate skipped: edge is seam or degenerated");
+            AppendMessage(messages, "Candidate skipped: edge is seam or degenerated");
             continue;
         }
 
         if (!Has3DCurve(edgeA)) {
-            AppendMessage(messages, "candidate skipped: edge has no 3D curve");
+            AppendMessage(messages, "Candidate skipped: edge has no 3D curve");
             continue;
         }
 
@@ -336,12 +492,12 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::ExtractCandidatePairs(
             }
 
             if (IsDegeneratedEdge(edgeB) || IsSeamEdge(edgeB, edgeFaceMap)) {
-                AppendMessage(messages, "candidate skipped: edge is seam or degenerated");
+                AppendMessage(messages, "Candidate skipped: edge is seam or degenerated");
                 continue;
             }
 
             if (!Has3DCurve(edgeB)) {
-                AppendMessage(messages, "candidate skipped: edge has no 3D curve");
+                AppendMessage(messages, "Candidate skipped: edge has no 3D curve");
                 continue;
             }
 
@@ -358,20 +514,20 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::ExtractCandidatePairs(
             const double maxLength = std::max(candidate.lengthA, candidate.lengthB);
             const double minLength = std::min(candidate.lengthA, candidate.lengthB);
             if (maxLength <= Precision::Confusion()) {
-                AppendMessage(messages, "candidate skipped: edge length is too small");
+                AppendMessage(messages, "Candidate skipped: edge length is too small");
                 continue;
             }
 
             candidate.lengthRatio = minLength / maxLength;
             if (candidate.lengthRatio + Precision::Confusion() < myParams.minLengthRatio) {
-                AppendMessage(messages, "candidate skipped: length ratio too small");
+                AppendMessage(messages, "Candidate skipped: length ratio too small");
                 continue;
             }
 
             // errorMessage 记录几何评估失败的具体原因。
             std::string errorMessage;
             if (!EvaluateGeometricSimilarity(candidate, errorMessage)) {
-                AppendMessage(messages, "candidate skipped: " + errorMessage);
+                AppendMessage(messages, "Candidate skipped: " + errorMessage);
                 continue;
             }
 
@@ -656,16 +812,16 @@ HealNarrowGap::EdgeChoice HealNarrowGap::ChooseEdgeToKeep(const Candidate& candi
 }
 
 // 尝试提交单个候选修复；任何校验失败都会返回 false，由调用方回滚并尝试下一候选。
-bool HealNarrowGap::TryRepairCandidate(
+bool HealNarrowGap::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
-    std::string& errorMessage) const
+    std::string& errorMessage)
 {
     // repairedShape 只有在整个局部替换和校验通过后才赋值。
     repairedShape.Nullify();
     if (currentShape.IsNull()) {
-        errorMessage = "current shape is null";
+        errorMessage = "Current shape is null";
         return false;
     }
 
@@ -675,7 +831,7 @@ bool HealNarrowGap::TryRepairCandidate(
     const EdgeChoice choice = ChooseEdgeToKeep(candidate);
     if (choice.keptEdge.IsNull() || choice.edgeToReplace.IsNull() ||
         choice.fixedFace.IsNull() || choice.faceToRebuild.IsNull()) {
-        errorMessage = "invalid edge choice";
+        errorMessage = "Invalid edge choice";
         return false;
     }
 
@@ -692,7 +848,7 @@ bool HealNarrowGap::TryRepairCandidate(
         choice.keptEdge,
         keptEdgeInFixedWire,
         errorMessage)) {
-        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        errorMessage = "Kept edge not found in fixed face wire: " + errorMessage;
         return false;
     }
 
@@ -701,22 +857,22 @@ bool HealNarrowGap::TryRepairCandidate(
         choice.edgeToReplace,
         edgeToReplaceInWire,
         errorMessage)) {
-        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        errorMessage = "Replaced edge not found in rebuilt face wire: " + errorMessage;
         return false;
     }
 
     if (!EnsurePCurveOnFace(keptEdgeInFixedWire, choice.fixedFace, pcurveTol, errorMessage)) {
-        errorMessage = "failed to add pcurve on fixed face: " + errorMessage;
+        errorMessage = "Failed to add pcurve on fixed face: " + errorMessage;
         return false;
     }
 
     if (!EnsurePCurveOnFace(edgeToReplaceInWire, choice.faceToRebuild, pcurveTol, errorMessage)) {
-        errorMessage = "failed to add pcurve on target face: " + errorMessage;
+        errorMessage = "Failed to add pcurve on rebuilt face: " + errorMessage;
         return false;
     }
 
     TopoDS_Face rebuiltFace;
-    if (!RebuildFaceReplacingEdge(
+    if (!RebuildFaceByReplacingEdge(
         choice.faceToRebuild,
         choice.edgeToReplace,
         keptEdgeInFixedWire,
@@ -726,6 +882,15 @@ bool HealNarrowGap::TryRepairCandidate(
         return false;
     }
 
+    // 对于某些候选，rebuiltFace通不过校验，这里先只做记录
+	BRepCheck_Analyzer analyzerFace(rebuiltFace);
+    if (!analyzerFace.IsValid()) {
+        AppendMessage(
+            messages_,
+            std::string("Warning: intermediate rebuilt face is invalid before shape replacement and final validation:")
+                + DescribeBRepCheckFailures(analyzerFace, rebuiltFace));
+	}
+
     // trialShape 是将目标 face 边界重建后的试运行形状。
     TopoDS_Shape trialShape;
     try {
@@ -733,21 +898,20 @@ bool HealNarrowGap::TryRepairCandidate(
         reshaper.Replace(choice.faceToRebuild, rebuiltFace);
         trialShape = reshaper.Apply(currentShape);
         if (trialShape.IsNull()) {
-            errorMessage = "shape replacement returned null";
+            errorMessage = "Replaced shape is null";
             return false;
         }
     }
     catch (Standard_Failure& failure) {
-        errorMessage = "shape replacement failed: " + FailureText(failure);
+        errorMessage = "Shape replacement failed: " + FailureText(failure);
         return false;
     }
 
-    // DBG-TEMP
     if (!FindEdgeUseInFaceWire(choice.fixedFace,
         choice.keptEdge,
         keptEdgeInFixedWire,
         errorMessage)) {
-        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        errorMessage = "Kept edge not found in fixed face wire: " + errorMessage;
         return false;
     }
 
@@ -755,21 +919,15 @@ bool HealNarrowGap::TryRepairCandidate(
         choice.keptEdge,
         edgeToReplaceInWire,
         errorMessage)) {
-        errorMessage = "kept edge not found in fixed face wire: " + errorMessage;
+        errorMessage = "Replaced edge not found in rebuilt face wire: " + errorMessage;
         return false;
     }
-
-    bool ff = edgeToReplaceInWire.IsSame(keptEdgeInFixedWire);
-    bool o1 = edgeToReplaceInWire.Orientation();
-    bool o2 = keptEdgeInFixedWire.Orientation();
-
-
 
     TopTools_IndexedDataMapOfShapeListOfShape repairedEdgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(trialShape, repairedEdgeFaceMap);
     TopTools_ListOfShape keptEdgeFaces;
     if (!FindFacesForSameEdge(repairedEdgeFaceMap, choice.keptEdge, keptEdgeFaces)) {
-        errorMessage = "kept edge not found after edge replacement";
+        errorMessage = "Kept edge not found after edge replacement";
         return false;
     }
 
@@ -782,7 +940,7 @@ bool HealNarrowGap::TryRepairCandidate(
 
         TopoDS_Edge keptEdgeInFace;
         if (!FindEdgeUseInFaceWire(face, choice.keptEdge, keptEdgeInFace, pcurveRepairError)) {
-            errorMessage = "failed to find kept edge use after replacement: " + pcurveRepairError;
+            errorMessage = "Failed to find kept edge use after replacement: " + pcurveRepairError;
             return false;
         }
         
@@ -791,7 +949,7 @@ bool HealNarrowGap::TryRepairCandidate(
                 face,
                 pcurveTol,
                 &pcurveRepairError)) {
-            errorMessage = "failed to repair kept edge pcurve after replacement: " + pcurveRepairError;
+            errorMessage = "Failed to repair kept edge pcurve after replacement: " + pcurveRepairError;
             return false;
         }
     }
@@ -816,7 +974,7 @@ bool HealNarrowGap::TryRepairCandidate(
 
     }
 
-    if (!ValidateEdgeReplacement(trialShape, choice.keptEdge, freeEdgesBefore, errorMessage)) {
+    if (!ValidateEdgeReplacement(currentShape, trialShape, choice.keptEdge, freeEdgesBefore, errorMessage)) {
         return false;
     }
 
@@ -869,7 +1027,7 @@ bool HealNarrowGap::FindEdgeUseInFaceWire(
     return false;
 }
 
-bool HealNarrowGap::RebuildFaceReplacingEdge(
+bool HealNarrowGap::RebuildFaceByReplacingEdge(
     const TopoDS_Face& faceToRebuild,
     const TopoDS_Edge& edgeToReplace,
     const TopoDS_Edge& replacementEdgeUse,
@@ -879,7 +1037,7 @@ bool HealNarrowGap::RebuildFaceReplacingEdge(
 {
     rebuiltFace.Nullify();
     if (faceToRebuild.IsNull() || edgeToReplace.IsNull() || replacementEdgeUse.IsNull()) {
-        errorMessage = "invalid face or edge for face rebuild";
+        errorMessage = "Invalid face or edge for face to rebuild";
         return false;
     }
 
@@ -890,7 +1048,7 @@ bool HealNarrowGap::RebuildFaceReplacingEdge(
         TopLoc_Location surfaceLocation;
         Handle(Geom_Surface) surface = BRep_Tool::Surface(forwardFace, surfaceLocation);
         if (surface.IsNull()) {
-            errorMessage = "target face has no support surface";
+            errorMessage = "Replaced face has no support surface";
             return false;
         }
 
@@ -938,7 +1096,7 @@ bool HealNarrowGap::RebuildFaceReplacingEdge(
                 }
 
                 if (!replacedInWire || !wireMaker.IsDone()) {
-                    errorMessage = "failed to rebuild target wire";
+                    errorMessage = "Failed to rebuild target wire";
                     return false;
                 }
 
@@ -974,7 +1132,7 @@ bool HealNarrowGap::RebuildFaceReplacingEdge(
         }
 
         if (!replaced) {
-            errorMessage = "edge to replace not found while rebuilding face";
+            errorMessage = "Edge to replace not found while rebuilding face";
             return false;
         }
 
@@ -1003,7 +1161,7 @@ bool HealNarrowGap::RebuildFaceReplacingEdge(
         rebuiltFace.Orientation(faceToRebuild.Orientation());
     }
     catch (Standard_Failure& failure) {
-        errorMessage = "face rebuild failed: " + FailureText(failure);
+        errorMessage = "Face rebuild failed: " + FailureText(failure);
         return false;
     }
 
@@ -1035,25 +1193,51 @@ bool HealNarrowGap::EnsurePCurveOnFace(
 
 // 校验整体 shape 有效，并检查自由边数量没有增加。
 bool HealNarrowGap::ValidateWholeShape(
+    const TopoDS_Shape& beforeShape,
     const TopoDS_Shape& repairedShape,
     int freeEdgesBefore,
     std::string& errorMessage) const
 {
+    if (beforeShape.IsNull()) {
+        errorMessage = "before shape is null";
+        return false;
+    }
+
     if (repairedShape.IsNull()) {
         errorMessage = "repaired shape is null";
         return false;
     }
 
-    try {
-        BRepCheck_Analyzer analyzer(repairedShape, Standard_True);
-        if (!analyzer.IsValid()) {
-            errorMessage = "whole shape invalid after replacement:";
-            errorMessage += DescribeBRepCheckFailures(analyzer, repairedShape);
-            return false;
+    std::string baselineError;
+    const std::vector<BRepCheckFailureInfo> baselineFailures =
+        CollectBRepCheckFailures(beforeShape, &baselineError);
+    if (!baselineError.empty()) {
+        errorMessage = "baseline BRepCheck failed: " + baselineError;
+        return false;
+    }
+
+    std::string repairedError;
+    const std::vector<BRepCheckFailureInfo> repairedFailures =
+        CollectBRepCheckFailures(repairedShape, &repairedError);
+    if (!repairedError.empty()) {
+        errorMessage = "repaired shape BRepCheck failed: " + repairedError;
+        return false;
+    }
+
+    std::vector<BRepCheckFailureInfo> newFailures;
+    for (const BRepCheckFailureInfo& failure : repairedFailures) {
+        if (!IsExistingBRepCheckFailure(failure, baselineFailures)) {
+            newFailures.push_back(failure);
         }
     }
-    catch (Standard_Failure& failure) {
-        errorMessage = "whole shape check failed: " + FailureText(failure);
+
+    if (!newFailures.empty()) {
+        errorMessage = "new BRepCheck failures after replacement:";
+        errorMessage += DescribeBRepCheckFailureList(newFailures);
+        if (!baselineFailures.empty()) {
+            errorMessage += " baseline failures:";
+            errorMessage += DescribeBRepCheckFailureList(baselineFailures);
+        }
         return false;
     }
 
@@ -1069,14 +1253,15 @@ bool HealNarrowGap::ValidateWholeShape(
 
 // 校验 edge 级替换结果：整体合法、自由边未增加、keptEdge 已被多个 face 共享且 pcurve 可用。
 bool HealNarrowGap::ValidateEdgeReplacement(
+    const TopoDS_Shape& beforeShape,
     const TopoDS_Shape& repairedShape,
     const TopoDS_Edge& keptEdge,
     int freeEdgesBefore,
     std::string& errorMessage) const
 {
-    /*if (!ValidateWholeShape(repairedShape, freeEdgesBefore, errorMessage)) {
+    if (!ValidateWholeShape(beforeShape, repairedShape, freeEdgesBefore, errorMessage)) {
         return false;
-    }*/
+    }
 
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(repairedShape, edgeFaceMap);
