@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include <Precision.hxx>
@@ -78,6 +79,7 @@ public:
     const std::vector<TopoDS_Edge>& getShortEdges() const { return shortEdges_; }
     const std::vector<MergeCandidate>& getMergeCandidates() const { return mergeCandidates_; }
     const TopTools_IndexedDataMapOfShapeListOfShape& getVertexEdgeMap() const { return vertexEdgeMap_; }
+    const std::vector<std::string>& getMessages() const { return messages_; }
 
     // 仅建立外部虚拟 PolyCurve，不修改 OCCT 原始拓扑。
     // 内部复用 findMergeCandidates() 的短边/邻边判定结果。
@@ -98,6 +100,7 @@ private:
     std::vector<TopoDS_Edge> shortEdges_;
     std::vector<MergeCandidate> mergeCandidates_;
     TopoDS_Shape resultShape_;
+    std::vector<std::string> messages_;
 
     std::vector<VirtualPolyCurve> virtualPolyCurves_;
     TopTools_DataMapOfShapeInteger edgePolyCurveMap_;
@@ -137,7 +140,8 @@ private:
     bool tryApplyBatch(const TopoDS_Shape& baseShape,
                        const std::vector<MergeCandidate>& batch,
                        TopoDS_Shape& committedShape,
-                       int& committedCount) const;
+                       int& committedCount);
+    void appendMessage(std::vector<std::string>& messages, const std::string& message) const;
     void buildTopologyMap();
     // 排除不适合合并的侯选边
     bool isHighRiskEdge(const TopoDS_Edge& edge) const;

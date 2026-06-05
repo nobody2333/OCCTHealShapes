@@ -172,9 +172,9 @@ int healNarrowGap(const std::string& fileName) {
 
 int main()
 {
-    std::string fileName = "h6k";
+    std::string fileName = "dumper truck";
     //modelConvert(fileName);
-	//mergeShortEdge(fileName);
-    healNarrowGap(fileName);
+	mergeShortEdge(fileName);
+    //healNarrowGap(fileName);
     return 0;
 }

@@ -54,10 +54,10 @@ public:
     const std::vector<std::string>& getMessages() const { return messages_; }
 
     // 使用当前 inputShape_ 执行修复；返回成功提交的局部修复次数。
-    int Perform();
+    int perform();
 
     // 便捷入口：先 setInputShape(inputShape)，再执行 Perform()。
-    int Perform(const TopoDS_Shape& inputShape);
+    int perform(const TopoDS_Shape& inputShape);
 
 private:
     // 单个候选边对及其几何评分数据。
@@ -117,33 +117,33 @@ private:
     std::vector<std::string> messages_;
 
     // 从当前 shape 中提取满足拓扑和几何条件的候选边对。
-    std::vector<Candidate> ExtractCandidatePairs(
+    std::vector<Candidate> extractCandidatePairs(
         const TopoDS_Shape& shape,
         const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
         std::vector<std::string>& messages) const;
 
     // 判断两条边是否共享同一对端点，允许方向相反。
-    bool HaveSameVertexPair(const TopoDS_Edge& edgeA, const TopoDS_Edge& edgeB) const;
+    bool haveSameVertexPair(const TopoDS_Edge& edgeA, const TopoDS_Edge& edgeB) const;
     // 按 edge 当前方向获取起点和终点。
-    bool GetEdgeVerticesOriented(const TopoDS_Edge& edge, TopoDS_Vertex& start, TopoDS_Vertex& end) const;
+    bool getEdgeVerticesOriented(const TopoDS_Edge& edge, TopoDS_Vertex& start, TopoDS_Vertex& end) const;
     // 判断是否为退化边。
-    bool IsDegeneratedEdge(const TopoDS_Edge& edge) const;
+    bool isDegeneratedEdge(const TopoDS_Edge& edge) const;
     // 判断是否为 seam edge。
-    bool IsSeamEdge(
+    bool isSeamEdge(
         const TopoDS_Edge& edge,
         const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap) const;
     // 判断 edge 是否存在 3D curve。
-    bool Has3DCurve(const TopoDS_Edge& edge) const;
+    bool has3DCurve(const TopoDS_Edge& edge) const;
 
     // 对候选边对做同步采样，计算 meanGap/maxGap/tangentScore。
-    bool EvaluateGeometricSimilarity(
+    bool evaluateGeometricSimilarity(
         Candidate& candidate,
         std::string& errorMessage) const;
 
     // 根据间隙、长度、切向和容差计算综合置信度。
-    double ComputeCandidateConfidence(const Candidate& candidate) const;
+    double computeCandidateConfidence(const Candidate& candidate) const;
     // 根据长度和容差策略决定保留哪条边。
-    EdgeChoice ChooseEdgeToKeep(const Candidate& candidate) const;
+    EdgeChoice chooseEdgeToKeep(const Candidate& candidate) const;
 
     // 尝试修复单个候选；失败时不修改 currentShape，由调用方尝试下一个候选。
     bool tryRepairCandidate(
@@ -152,21 +152,15 @@ private:
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
-    // 确认 oldEdge 存在于 oldFace 的某条 wire 中。
-    bool FaceContainsEdgeInWire(
-        const TopoDS_Face& oldFace,
-        const TopoDS_Edge& oldEdge,
-        std::string& errorMessage) const;
-
     // 在 oldFace 的 wire 中查找 oldEdge 的实际 edge use。
-    bool FindEdgeUseInFaceWire(
+    bool findEdgeUseInFaceWire(
         const TopoDS_Face& oldFace,
         const TopoDS_Edge& oldEdge,
         TopoDS_Edge& oldEdgeInWire,
         std::string& errorMessage) const;
 
     // 重建 faceToRebuild 的边界，用 replacementEdgeUse 替换 edgeToReplace。
-    bool RebuildFaceByReplacingEdge(
+    bool rebuildFaceByReplacingEdge(
         const TopoDS_Face& faceToRebuild,
         const TopoDS_Edge& edgeToReplace,
         const TopoDS_Edge& replacementEdgeUse,
@@ -175,21 +169,21 @@ private:
         std::string& errorMessage) const;
 
     // 确保 edge 在 face 的 surface 上有可用 pcurve。
-    bool EnsurePCurveOnFace(
+    bool ensurePCurveOnFace(
         TopoDS_Edge& edge,
         const TopoDS_Face& face,
         double tol,
         std::string& errorMessage) const;
 
     // 校验替换后的整体 shape 有效，且 free edge 数量没有增加。
-    bool ValidateWholeShape(
+    bool validateWholeShape(
         const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& repairedShape,
         int freeEdgesBefore,
         std::string& errorMessage) const;
 
     // 校验 edge 级替换后 keptEdge 已经被多个 face 共享，并且 pcurve 可用。
-    bool ValidateEdgeReplacement(
+    bool validateEdgeReplacement(
         const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& repairedShape,
         const TopoDS_Edge& keptEdge,
@@ -197,5 +191,5 @@ private:
         std::string& errorMessage) const;
 
     // 追加修复日志。
-    void AppendMessage(std::vector<std::string>& messages, const std::string& message) const;
+    void appendMessage(std::vector<std::string>& messages, const std::string& message) const;
 };

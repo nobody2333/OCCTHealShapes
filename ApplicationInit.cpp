@@ -212,6 +212,20 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
                                                                 double manualLengthThreshold,
                                                                 double angleThresholdDeg)
 {
+    const std::filesystem::path mergeLogPath = std::filesystem::path("assets") / "fixedShortEdge" / "MergeShortEdgeLog.txt";
+    std::filesystem::create_directories(mergeLogPath.parent_path());
+    {
+        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "MergeShortEdge log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open MergeShortEdge log file: "
+                      << mergeLogPath.string() << std::endl;
+        }
+    }
+
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot merge short edges because the XCAF document is null." << std::endl;
         return 0;
@@ -256,6 +270,29 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
         shortEdgeMerger.setAngleThresholdDeg(angleThresholdDeg);
         shortEdgeMerger.setInputShape(originalShape);
         const int containerMergedCount = shortEdgeMerger.performMerge();
+
+        {
+            std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[MergeShortEdge] Container " << i
+                        << ", mergedCount=" << containerMergedCount
+                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = shortEdgeMerger.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+                logFile << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append MergeShortEdge log file: "
+                          << mergeLogPath.string() << std::endl;
+            }
+        }
 
         TopoDS_Shape processedShape = shortEdgeMerger.getResultShape();
         if (processedShape.IsNull()) {
@@ -342,7 +379,7 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
 
         HealNarrowGap narrowGapHealer(params);
         narrowGapHealer.setInputShape(originalShape);
-        const int containerRepairedCount = narrowGapHealer.Perform();
+        const int containerRepairedCount = narrowGapHealer.perform();
 
         {
             std::ofstream logFile(healLogPath, std::ios::out | std::ios::app);

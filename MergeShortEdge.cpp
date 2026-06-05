@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 #include "MergeShortEdge.h"
 #include "GeometryUtils.h"
@@ -58,6 +59,7 @@ void MergeShortEdge::setInputShape(const TopoDS_Shape& shape)
     mergeCandidates_.clear();
     vertexEdgeMap_.Clear();
     edgeFaceMap_.Clear();
+    messages_.clear();
     resultShape_.Nullify();
     clearVirtualPolyCurves();
     refreshLengthThreshold();
@@ -742,7 +744,10 @@ std::vector<MergeCandidate> MergeShortEdge::findMergeCandidates()
 
 int MergeShortEdge::performMerge()
 {
+    messages_.clear();
+
     if (inputShape_.IsNull()) {
+        appendMessage(messages_, "Input shape is null");
         return 0;
     }
 
@@ -751,7 +756,16 @@ int MergeShortEdge::performMerge()
     //inputShape_ = resultShape_;
     int mergeCount = 0;
 
-    refreshLengthThreshold();
+    const bool thresholdReady = refreshLengthThreshold();
+    {
+        std::ostringstream os;
+        os << "Threshold mode=" << static_cast<int>(thresholdMode_)
+           << ", lengthThreshold=" << lengthThreshold_
+           << ", thresholdReady=" << (thresholdReady ? "true" : "false")
+           << ", angleThresholdDeg=" << angleThresholdDeg_;
+        appendMessage(messages_, os.str());
+    }
+
     allEdges_.clear();
     shortEdges_.clear();
     mergeCandidates_.clear();
@@ -759,22 +773,45 @@ int MergeShortEdge::performMerge()
     edgeFaceMap_.Clear();
 
     findMergeCandidates();
+    {
+        std::ostringstream os;
+        os << "Detected short edge count=" << shortEdges_.size()
+           << ", merge candidate count=" << mergeCandidates_.size();
+        appendMessage(messages_, os.str());
+    }
+
     if (mergeCandidates_.empty()) {
+        appendMessage(messages_, "No merge candidates found");
         return 0;
     }
 
     const std::vector<std::vector<MergeCandidate>> candidateBatches = buildCandidateBatches(mergeCandidates_);
+    {
+        std::ostringstream os;
+        os << "Candidate batch count=" << candidateBatches.size();
+        appendMessage(messages_, os.str());
+    }
+
     TopoDS_Shape currentShape = inputShape_;
 
-    for (const auto& batch : candidateBatches) {
+    for (std::size_t batchIndex = 0; batchIndex < candidateBatches.size(); ++batchIndex) {
+        const auto& batch = candidateBatches[batchIndex];
         TopoDS_Shape committedShape;
         int committedCount = 0;
         if (!tryApplyBatch(currentShape, batch, committedShape, committedCount)) {
+            std::ostringstream os;
+            os << "Batch " << batchIndex << " failed, candidate count=" << batch.size();
+            appendMessage(messages_, os.str());
             continue;
         }
 
         currentShape = committedShape;
         mergeCount += committedCount;
+
+        std::ostringstream os;
+        os << "Batch " << batchIndex << " committed, candidate count=" << batch.size()
+           << ", mergedCount=" << committedCount;
+        appendMessage(messages_, os.str());
     }
 
     resultShape_ = currentShape;
@@ -784,6 +821,12 @@ int MergeShortEdge::performMerge()
     vertexEdgeMap_.Clear();
     edgeFaceMap_.Clear();
     refreshLengthThreshold();
+
+    {
+        std::ostringstream os;
+        os << "Merge finished, total merged count=" << mergeCount;
+        appendMessage(messages_, os.str());
+    }
 
     return mergeCount;
 }
@@ -868,12 +911,13 @@ std::vector<std::vector<MergeCandidate>> MergeShortEdge::buildCandidateBatches(c
 bool MergeShortEdge::tryApplyBatch(const TopoDS_Shape& baseShape,
                                    const std::vector<MergeCandidate>& batch,
                                    TopoDS_Shape& committedShape,
-                                   int& committedCount) const
+                                   int& committedCount)
 {
     committedShape = TopoDS_Shape();
     committedCount = 0;
 
     if (baseShape.IsNull() || batch.empty()) {
+        appendMessage(messages_, "Batch skipped: base shape is null or batch is empty");
         return false;
     }
 
@@ -884,11 +928,18 @@ bool MergeShortEdge::tryApplyBatch(const TopoDS_Shape& baseShape,
 
     for (const auto& candidate : batch) {
         if (batchRemovedEdges.Contains(candidate.edge1) || batchRemovedEdges.Contains(candidate.edge2)) {
+            appendMessage(messages_, "Candidate skipped: candidate edge already removed in this batch");
             continue;
         }
 
         TopoDS_Edge newEdge = createMergedEdge(candidate);
         if (newEdge.IsNull() || !validateMergedEdgeGeometry(newEdge)) {
+            std::ostringstream os;
+            os << "Candidate skipped: merged edge is null or invalid"
+               << ", shortLength=" << candidate.length1
+               << ", adjacentLength=" << candidate.length2
+               << ", angle=" << candidate.angle;
+            appendMessage(messages_, os.str());
             continue;
         }
 
@@ -909,17 +960,20 @@ bool MergeShortEdge::tryApplyBatch(const TopoDS_Shape& baseShape,
     }
 
     if (committedCount == 0) {
+        appendMessage(messages_, "Batch failed: no candidate produced a valid replacement edge");
         return false;
     }
 
     TopoDS_Shape trialShape = batchReshaper.Apply(baseShape);
     if (trialShape.IsNull()) {
         committedCount = 0;
+        appendMessage(messages_, "Batch failed: reshaper produced a null shape");
         return false;
     }
 
     if (!repairAffectedPCurves(trialShape, batchNewEdges)) {
         committedCount = 0;
+        appendMessage(messages_, "Batch failed: affected pcurve repair failed");
         return false;
     }
 
@@ -934,6 +988,7 @@ bool MergeShortEdge::tryApplyBatch(const TopoDS_Shape& baseShape,
 
     if (!validateShape(trialShape)) {
         committedCount = 0;
+        appendMessage(messages_, "Batch failed: whole shape is invalid after merge");
         return false;
     }
 
@@ -1137,4 +1192,9 @@ bool MergeShortEdge::setLengthThresholdHybrid()
     lengthThreshold_ = std::max(resolvedThreshold, Precision::Confusion() * 10.0);
     thresholdMode_ = ShortEdgeThresholdMode::HybridGlobalAndLocal;
     return true;
+}
+
+void MergeShortEdge::appendMessage(std::vector<std::string>& messages, const std::string& message) const
+{
+    messages.push_back(message);
 }
