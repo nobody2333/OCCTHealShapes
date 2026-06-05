@@ -153,6 +153,7 @@
     <ClCompile Include="GeometryUtils.cpp" />
     <ClCompile Include="HealNarrowGap.cpp" />
     <ClCompile Include="Logger.cpp" />
+    <ClCompile Include="MergeDuplicateVertex.cpp" />
     <ClCompile Include="MergeShortEdge.cpp" />
     <ClCompile Include="TopologyUtils.cpp" />
     <ClCompile Include="TopoTools.cpp">
@@ -170,6 +171,7 @@
     <ClInclude Include="GeometryUtils.h" />
     <ClInclude Include="HealNarrowGap.h" />
     <ClInclude Include="Logger.h" />
+    <ClInclude Include="MergeDuplicateVertex.h" />
     <ClInclude Include="MergeShortEdge.h" />
     <ClInclude Include="TopologyUtils.h" />
     <ClInclude Include="TopoTools.h" />

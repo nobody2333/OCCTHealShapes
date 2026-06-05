@@ -48,6 +48,9 @@
     <ClCompile Include="HealNarrowGap.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="MergeDuplicateVertex.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Viewer.h">
@@ -75,6 +78,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="HealNarrowGap.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="MergeDuplicateVertex.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
