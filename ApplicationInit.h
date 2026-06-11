@@ -17,6 +17,7 @@
 
 #include "MergeShortEdge.h"
 #include "HealNarrowGap.h"
+#include "MergeDuplicateVertex.h"
 
 class ApplicationInit {
 public:
@@ -25,17 +26,31 @@ public:
 
     Handle(TDocStd_Application) getApp() const { return anApp_; }
     Handle(TDocStd_Document) getDoc() const { return aDoc_; }
+    TopoDS_Shape getStepControlShape() const { return stepControlShape_; }
 
     bool importStep(const std::string& filePath);
     bool importIges(const std::string& filePath);
+    // STEPControl_Reader读入stp文件
+    bool importStepControlShape(const std::string& filePath);
 
     bool exportStep(const TopoDS_Shape& shape, const std::string& filePath) const;
+    bool exportStepControlShape(const TopoDS_Shape& shape, const std::string& filePath) const;
+    int mergeDuplicateVerticesOnStepControlShapeAndExport(
+        const std::string& filePath,
+        const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params());
     int mergeShortEdgesOnLowestContainersAndExport(const std::string& filePath,
                                                    bool useManualLengthThreshold,
                                                    double manualLengthThreshold,
                                                    double angleThresholdDeg);
     int healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
                                                   const HealNarrowGap::Params& params = HealNarrowGap::Params());
+    int mergeDuplicateVerticesOnLowestContainersAndExport(
+        const std::string& filePath,
+        const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params());
+    int mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAndExport(
+        const std::string& filePath,
+        const MergeDuplicateVertex::Params& duplicateVertexParams = MergeDuplicateVertex::Params(),
+        const HealNarrowGap::Params& narrowGapParams = HealNarrowGap::Params());
 
     std::vector<TopoDS_Shape> getAllShapes() const;
     std::vector<TopoDS_Solid> getAllSolids() const;
@@ -66,6 +81,7 @@ private:
     std::vector<TopoDS_Shape> aShapeVec_;
     std::vector<TopoDS_Shell> aShellVec_;
     std::vector<TopoDS_Solid> aSolidVec_;
+    TopoDS_Shape stepControlShape_;
     std::string inputStepUnit_ = "MM";
     Handle(TDocStd_Application) anApp_;
     Handle(TDocStd_Document) aDoc_;

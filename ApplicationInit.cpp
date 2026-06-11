@@ -12,6 +12,8 @@
 #include <Message_Printer.hxx>
 #include <Message_SequenceOfPrinters.hxx>
 #include <STEPCAFControl_Writer.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TCollection_HAsciiString.hxx>
@@ -124,6 +126,53 @@ bool ApplicationInit::importStep(const std::string& filePath)
     return transferAndCacheTopLevelShapes(aReader.Transfer(aDoc_), "STEP");
 }
 
+bool ApplicationInit::importStepControlShape(const std::string& filePath)
+{
+    STEPControl_Reader reader;
+    stepControlShape_.Nullify();
+
+    std::cout << "Reading STEP shape with STEPControl_Reader: " << filePath << "......" << std::endl;
+
+    const IFSelect_ReturnStatus status = reader.ReadFile(filePath.c_str());
+    if (status != IFSelect_RetDone) {
+        std::cerr << "Error: STEPControl_Reader failed to read STEP file." << std::endl;
+        return false;
+    }
+
+    TColStd_SequenceOfAsciiString lengthUnits;
+    TColStd_SequenceOfAsciiString angleUnits;
+    TColStd_SequenceOfAsciiString solidAngleUnits;
+    reader.FileUnits(lengthUnits, angleUnits, solidAngleUnits);
+    if (!lengthUnits.IsEmpty()) {
+        inputStepUnit_ = normalizeStepLengthUnit(lengthUnits.First());
+    }
+    else {
+        inputStepUnit_ = "MM";
+    }
+    std::cout << "Input STEP length unit: " << inputStepUnit_ << std::endl;
+
+    if (reader.NbRootsForTransfer() <= 0) {
+        std::cerr << "Error: STEPControl_Reader found no transferable roots." << std::endl;
+        return false;
+    }
+
+    const Standard_Integer transferredRootCount = reader.TransferRoots();
+    if (transferredRootCount <= 0) {
+        std::cerr << "Error: STEPControl_Reader failed to transfer roots." << std::endl;
+        return false;
+    }
+
+    stepControlShape_ = reader.OneShape();
+    if (stepControlShape_.IsNull()) {
+        std::cerr << "Error: STEPControl_Reader produced a null shape." << std::endl;
+        return false;
+    }
+
+    std::cout << "STEPControl_Reader transferred roots: " << transferredRootCount << std::endl;
+    std::cout << "STEP shape read successfully." << std::endl;
+    return true;
+}
+
 bool ApplicationInit::importIges(const std::string& filePath)
 {
     IGESCAFControl_Reader aReader;
@@ -181,6 +230,113 @@ bool ApplicationInit::exportStep(const TopoDS_Shape& shape, const std::string& f
     shapeTool->UpdateAssemblies();
 
     return writeXcafDocumentStep(exportDoc, filePath, false);
+}
+
+bool ApplicationInit::exportStepControlShape(const TopoDS_Shape& shape, const std::string& filePath) const
+{
+    if (shape.IsNull()) {
+        std::cerr << "Error: The shape to export with STEPControl_Writer is null." << std::endl;
+        return false;
+    }
+
+    const std::filesystem::path outputPath(filePath);
+    if (outputPath.has_parent_path()) {
+        std::filesystem::create_directories(outputPath.parent_path());
+    }
+
+    std::cout << "Writing STEP shape with STEPControl_Writer to: " << filePath << "......" << std::endl;
+    setOutputStepUnitFromInput();
+
+    STEPControl_Writer writer;
+
+	// 利用RAII机制在Transfer过程中暂时提升OCCT消息级别，减少输出信息干扰
+    ScopedOccInfoSilencer occInfoSilencer;
+    if (writer.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone) {
+        std::cerr << "Error: Failed to transfer shape to STEPControl_Writer." << std::endl;
+        return false;
+    }
+
+    if (writer.Write(filePath.c_str()) == IFSelect_RetDone) {
+        std::cout << "STEP shape written successfully." << std::endl;
+        return true;
+    }
+
+    std::cerr << "Error: Failed to write STEP shape." << std::endl;
+    return false;
+}
+
+int ApplicationInit::mergeDuplicateVerticesOnStepControlShapeAndExport(
+    const std::string& filePath,
+    const MergeDuplicateVertex::Params& params)
+{
+    const std::filesystem::path mergeLogPath =
+        std::filesystem::path("assets") / "fixedDuplicateVertexStepControl" / "MergeDuplicateVertexStepControlLog.txt";
+    std::filesystem::create_directories(mergeLogPath.parent_path());
+    {
+        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "MergeDuplicateVertex STEPControl shape log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open MergeDuplicateVertex STEPControl log file: "
+                      << mergeLogPath.string() << std::endl;
+        }
+    }
+
+    if (stepControlShape_.IsNull()) {
+        std::cerr << "Error: Cannot merge duplicate vertices because STEPControl shape is null." << std::endl;
+        return 0;
+    }
+
+    MergeDuplicateVertex duplicateVertexMerger(params);
+    duplicateVertexMerger.setInputShape(stepControlShape_);
+    const int mergedCount = duplicateVertexMerger.perform();
+
+    {
+        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
+        if (logFile) {
+            logFile << "[MergeDuplicateVertex][STEPControl]"
+                    << " mergedCount=" << mergedCount
+                    << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
+                    << ", inputShapeType=" << static_cast<int>(stepControlShape_.ShapeType())
+                    << std::endl;
+
+            const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
+            if (messages.empty()) {
+                logFile << "  (no messages)" << std::endl;
+            }
+            for (const std::string& message : messages) {
+                logFile << "  - " << message << std::endl;
+            }
+            logFile << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot append MergeDuplicateVertex STEPControl log file: "
+                      << mergeLogPath.string() << std::endl;
+        }
+    }
+
+    TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
+    if (processedShape.IsNull()) {
+        std::cerr << "Error: MergeDuplicateVertex produced a null STEPControl result shape." << std::endl;
+        return 0;
+    }
+
+    if (processedShape.ShapeType() != stepControlShape_.ShapeType()) {
+        std::cerr << "Error: MergeDuplicateVertex changed STEPControl shape type from "
+                  << static_cast<int>(stepControlShape_.ShapeType()) << " to "
+                  << static_cast<int>(processedShape.ShapeType()) << "." << std::endl;
+        return 0;
+    }
+
+    stepControlShape_ = processedShape;
+
+    if (!exportStepControlShape(stepControlShape_, filePath)) {
+        return -1;
+    }
+
+    return mergedCount;
 }
 
 void ApplicationInit::collectTopLevelTargets(std::vector<EditableContainerTarget>& targets) const {
@@ -324,6 +480,279 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
     }
 
     return mergedCount;
+}
+
+int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
+    const std::string& filePath,
+    const MergeDuplicateVertex::Params& params)
+{
+    const std::filesystem::path mergeLogPath =
+        std::filesystem::path("assets") / "fixedDuplicateVertex" / "MergeDuplicateVertexLog.txt";
+    std::filesystem::create_directories(mergeLogPath.parent_path());
+    {
+        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "MergeDuplicateVertex log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open MergeDuplicateVertex log file: "
+                      << mergeLogPath.string() << std::endl;
+        }
+    }
+
+    if (aDoc_.IsNull()) {
+        std::cerr << "Error: Cannot merge duplicate vertices because the XCAF document is null." << std::endl;
+        return 0;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) {
+        std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        return 0;
+    }
+
+    std::vector<EditableContainerTarget> targets;
+    collectTopLevelTargets(targets);
+    if (targets.empty()) {
+        std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        return 0;
+    }
+
+    int mergedCount = 0;
+    int replacedCount = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const EditableContainerTarget& target = targets[i];
+        if (target.ownerLabel.IsNull()) {
+            std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            continue;
+        }
+
+        const TopoDS_Shape currentShape = shapeTool->GetShape(target.ownerLabel);
+        const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
+        if (originalShape.IsNull()) {
+            std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            continue;
+        }
+
+        MergeDuplicateVertex duplicateVertexMerger(params);
+        duplicateVertexMerger.setInputShape(originalShape);
+        const int containerMergedCount = duplicateVertexMerger.perform();
+
+        {
+            std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[MergeDuplicateVertex] Container " << i
+                        << ", mergedCount=" << containerMergedCount
+                        << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
+                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+                logFile << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append MergeDuplicateVertex log file: "
+                          << mergeLogPath.string() << std::endl;
+            }
+        }
+
+        TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
+        if (processedShape.IsNull()) {
+            std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            continue;
+        }
+
+        if (processedShape.ShapeType() != originalShape.ShapeType()) {
+            std::cerr << "Container " << i << " changed shape type from "
+                      << static_cast<int>(originalShape.ShapeType()) << " to "
+                      << static_cast<int>(processedShape.ShapeType())
+                      << ", keep original shape." << std::endl;
+            continue;
+        }
+
+        if (!duplicateVertexMerger.isModified()) {
+            continue;
+        }
+
+        shapeTool->SetShape(target.ownerLabel, processedShape);
+        mergedCount += containerMergedCount;
+        ++replacedCount;
+    }
+
+    shapeTool->UpdateAssemblies();
+    refreshShapeCache();
+    std::cout << "Replaced lowest containers after duplicate-vertex merge: " << replacedCount << std::endl;
+    if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        return -1;
+    }
+
+    return mergedCount;
+}
+
+int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAndExport(
+    const std::string& filePath,
+    const MergeDuplicateVertex::Params& duplicateVertexParams,
+    const HealNarrowGap::Params& narrowGapParams)
+{
+    const std::filesystem::path chainLogPath =
+        std::filesystem::path("assets") / "fixedDuplicateVertexNarrowGap" / "MergeDuplicateVertexHealNarrowGapLog.txt";
+    std::filesystem::create_directories(chainLogPath.parent_path());
+    {
+        std::ofstream logFile(chainLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "MergeDuplicateVertex + HealNarrowGap log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open duplicate-vertex/narrow-gap log file: "
+                      << chainLogPath.string() << std::endl;
+        }
+    }
+
+    if (aDoc_.IsNull()) {
+        std::cerr << "Error: Cannot run duplicate-vertex/narrow-gap repair because the XCAF document is null." << std::endl;
+        return 0;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) {
+        std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        return 0;
+    }
+
+    std::vector<EditableContainerTarget> targets;
+    collectTopLevelTargets(targets);
+    if (targets.empty()) {
+        std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        return 0;
+    }
+
+    int duplicateMergedCount = 0;
+    int narrowGapRepairedCount = 0;
+    int replacedCount = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const EditableContainerTarget& target = targets[i];
+        if (target.ownerLabel.IsNull()) {
+            std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            continue;
+        }
+
+        const TopoDS_Shape currentShape = shapeTool->GetShape(target.ownerLabel);
+        const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
+        if (originalShape.IsNull()) {
+            std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            continue;
+        }
+
+        TopoDS_Shape workingShape = originalShape;
+        bool containerModified = false;
+
+        MergeDuplicateVertex duplicateVertexMerger(duplicateVertexParams);
+        duplicateVertexMerger.setInputShape(workingShape);
+        const int containerDuplicateMergedCount = duplicateVertexMerger.perform();
+
+        {
+            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[MergeDuplicateVertex] Container " << i
+                        << ", mergedCount=" << containerDuplicateMergedCount
+                        << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
+                        << ", inputShapeType=" << static_cast<int>(workingShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+            }
+        }
+
+        TopoDS_Shape duplicateProcessedShape = duplicateVertexMerger.getResultShape();
+        if (!duplicateProcessedShape.IsNull() &&
+            duplicateProcessedShape.ShapeType() == originalShape.ShapeType() &&
+            duplicateVertexMerger.isModified()) {
+            workingShape = duplicateProcessedShape;
+            duplicateMergedCount += containerDuplicateMergedCount;
+            containerModified = true;
+        }
+        else if (duplicateVertexMerger.isModified()) {
+            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "  - Warning: duplicate-vertex result is invalid or changed shape type; "
+                        << "HealNarrowGap will use original container shape." << std::endl;
+            }
+        }
+
+        HealNarrowGap narrowGapHealer(narrowGapParams);
+        narrowGapHealer.setInputShape(workingShape);
+        const int containerNarrowGapRepairedCount = narrowGapHealer.perform();
+
+        {
+            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[HealNarrowGap] Container " << i
+                        << ", repairedCount=" << containerNarrowGapRepairedCount
+                        << ", modified=" << (narrowGapHealer.isModified() ? "true" : "false")
+                        << ", inputShapeType=" << static_cast<int>(workingShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = narrowGapHealer.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+                logFile << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append duplicate-vertex/narrow-gap log file: "
+                          << chainLogPath.string() << std::endl;
+            }
+        }
+
+        TopoDS_Shape narrowGapProcessedShape = narrowGapHealer.getResultShape();
+        if (!narrowGapProcessedShape.IsNull() &&
+            narrowGapProcessedShape.ShapeType() == originalShape.ShapeType() &&
+            narrowGapHealer.isModified()) {
+            workingShape = narrowGapProcessedShape;
+            narrowGapRepairedCount += containerNarrowGapRepairedCount;
+            containerModified = true;
+        }
+        else if (narrowGapHealer.isModified()) {
+            std::cerr << "Container " << i
+                      << " narrow-gap result is invalid or changed shape type, keep previous shape." << std::endl;
+        }
+
+        if (!containerModified) {
+            continue;
+        }
+
+        shapeTool->SetShape(target.ownerLabel, workingShape);
+        ++replacedCount;
+    }
+
+    shapeTool->UpdateAssemblies();
+    refreshShapeCache();
+    std::cout << "Replaced lowest containers after duplicate-vertex/narrow-gap repair: "
+              << replacedCount << std::endl;
+    std::cout << "Duplicate vertices merged: " << duplicateMergedCount
+              << ", narrow gaps repaired: " << narrowGapRepairedCount << std::endl;
+    if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        return -1;
+    }
+
+    return duplicateMergedCount + narrowGapRepairedCount;
 }
 
 int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,

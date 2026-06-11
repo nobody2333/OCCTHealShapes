@@ -13,9 +13,9 @@ public:
     // 修复参数：第一版只做 pair-only / near-zero-only，不处理三个及以上重复点聚类。
     struct Params {
         // 两点距离小于该值时才认为是近似 0 距离。
-        double zeroDistanceTolerance = 1.0e-7;
+        double zeroDistanceTolerance = 1.0e-4;
         // 为 true 时，如果两个 vertex 分属不同 solid，则跳过。
-        bool forbidAcrossDifferentSolids = true;
+        bool forbidAcrossDifferentSolids = false;
         // 为 true 时，单次替换后运行 ShapeFix_Shape；默认关闭以减少额外改动。
         bool runShapeFixAfterMerge = false;
         // 预留调试开关；当前 messages_ 始终保留关键过程日志。
