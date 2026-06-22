@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <IGESCAFControl_Reader.hxx>
 #include <IGESData_BasicEditor.hxx>
 #include <IGESData_GlobalSection.hxx>
@@ -25,8 +26,108 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include "TopologyUtils.h"
 
 namespace {
+    std::string labelEntryString(const TDF_Label& label)
+    {
+        if (label.IsNull()) {
+            return "<null>";
+        }
+
+        std::ostringstream stream;
+        label.EntryDump(stream);
+        return stream.str();
+    }
+
+    struct ShapeLabelDebugInfo {
+        TDF_Label label;
+        TDF_Label parentLabel;
+        TopAbs_ShapeEnum shapeType;
+    };
+
+    void collectShellCompoundLabels(const TDF_Label& label,
+                                    std::vector<ShapeLabelDebugInfo>& shellLabels,
+                                    std::vector<ShapeLabelDebugInfo>& compoundLabels)
+    {
+        if (XCAFDoc_ShapeTool::IsShape(label)) {
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (!shape.IsNull()) {
+                const TopAbs_ShapeEnum shapeType = shape.ShapeType();
+                if (shapeType == TopAbs_SHELL) {
+                    shellLabels.push_back({ label, label.Father(), shapeType });
+                }
+                else if (shapeType == TopAbs_COMPOUND) {
+                    compoundLabels.push_back({ label, label.Father(), shapeType });
+                }
+            }
+        }
+
+        for (TDF_ChildIterator childIterator(label); childIterator.More(); childIterator.Next()) {
+            collectShellCompoundLabels(childIterator.Value(), shellLabels, compoundLabels);
+        }
+    }
+
+    void appendUniqueParentLabel(const TDF_Label& parentLabel, std::vector<TDF_Label>& parentLabels)
+    {
+        for (const TDF_Label& existingParentLabel : parentLabels) {
+            if (existingParentLabel == parentLabel) {
+                return;
+            }
+        }
+
+        parentLabels.push_back(parentLabel);
+    }
+
+    void dumpShellCompoundParentDebug(const TDF_Label& rootLabel)
+    {
+        std::vector<ShapeLabelDebugInfo> shellLabels;
+        std::vector<ShapeLabelDebugInfo> compoundLabels;
+        collectShellCompoundLabels(rootLabel, shellLabels, compoundLabels);
+
+        std::vector<TDF_Label> parentLabels;
+        for (const ShapeLabelDebugInfo& shellInfo : shellLabels) {
+            appendUniqueParentLabel(shellInfo.parentLabel, parentLabels);
+        }
+        for (const ShapeLabelDebugInfo& compoundInfo : compoundLabels) {
+            appendUniqueParentLabel(compoundInfo.parentLabel, parentLabels);
+        }
+
+        std::cout << "[collectTopLevelTargets debug] shell count: " << shellLabels.size()
+                  << ", compound count: " << compoundLabels.size()
+                  << ", parent group count: " << parentLabels.size() << std::endl;
+
+        for (const TDF_Label& parentLabel : parentLabels) {
+            std::vector<std::string> shellEntries;
+            std::vector<std::string> compoundEntries;
+
+            for (const ShapeLabelDebugInfo& shellInfo : shellLabels) {
+                if (shellInfo.parentLabel == parentLabel) {
+                    shellEntries.push_back(labelEntryString(shellInfo.label));
+                }
+            }
+
+            for (const ShapeLabelDebugInfo& compoundInfo : compoundLabels) {
+                if (compoundInfo.parentLabel == parentLabel) {
+                    compoundEntries.push_back(labelEntryString(compoundInfo.label));
+                }
+            }
+
+            std::cout << "[collectTopLevelTargets debug] parent="
+                      << labelEntryString(parentLabel)
+                      << ", shells=" << shellEntries.size()
+                      << ", compounds=" << compoundEntries.size() << std::endl;
+
+            for (const std::string& shellEntry : shellEntries) {
+                std::cout << "  shell label: " << shellEntry << std::endl;
+            }
+
+            for (const std::string& compoundEntry : compoundEntries) {
+                std::cout << "  compound label: " << compoundEntry << std::endl;
+            }
+        }
+    }
+
     std::string normalizeStepLengthUnit(const TCollection_AsciiString& unitName)
     {
         std::string unit = unitName.ToCString();
@@ -57,6 +158,25 @@ namespace {
         }
 
         return "MM";
+    }
+
+    void printStepShapeType(const TopoDS_Shape inputShape) {
+        int index = 0;
+        for (TopoDS_Iterator it(inputShape); it.More(); it.Next()) {
+            const TopoDS_Shape child = it.Value();
+            if (child.ShapeType() == TopAbs_COMPOUND) {
+                std::cout << "child[" << index << "] type = "
+                    << TopologyUtils::ShapeTypeName(child.ShapeType())
+                    << std::endl;
+				printStepShapeType(child);
+                continue;
+            }
+            std::cout << "child[" << index << "] type = "
+                << TopologyUtils::ShapeTypeName(child.ShapeType())
+                << std::endl;
+
+            ++index;
+        }
     }
 
 // 控制Transfer减少输出信息
@@ -126,10 +246,10 @@ bool ApplicationInit::importStep(const std::string& filePath)
     return transferAndCacheTopLevelShapes(aReader.Transfer(aDoc_), "STEP");
 }
 
-bool ApplicationInit::importStepControlShape(const std::string& filePath)
+bool ApplicationInit::importStepAsShape(const std::string& filePath)
 {
     STEPControl_Reader reader;
-    stepControlShape_.Nullify();
+    importedStepShape_.Nullify();
 
     std::cout << "Reading STEP shape with STEPControl_Reader: " << filePath << "......" << std::endl;
 
@@ -162,8 +282,12 @@ bool ApplicationInit::importStepControlShape(const std::string& filePath)
         return false;
     }
 
-    stepControlShape_ = reader.OneShape();
-    if (stepControlShape_.IsNull()) {
+    importedStepShape_ = reader.OneShape();
+
+    // DEBUG: 临时信息
+    printStepShapeType(importedStepShape_);
+
+    if (importedStepShape_.IsNull()) {
         std::cerr << "Error: STEPControl_Reader produced a null shape." << std::endl;
         return false;
     }
@@ -232,7 +356,7 @@ bool ApplicationInit::exportStep(const TopoDS_Shape& shape, const std::string& f
     return writeXcafDocumentStep(exportDoc, filePath, false);
 }
 
-bool ApplicationInit::exportStepControlShape(const TopoDS_Shape& shape, const std::string& filePath) const
+bool ApplicationInit::exportStepShape(const TopoDS_Shape& shape, const std::string& filePath) const
 {
     if (shape.IsNull()) {
         std::cerr << "Error: The shape to export with STEPControl_Writer is null." << std::endl;
@@ -265,41 +389,41 @@ bool ApplicationInit::exportStepControlShape(const TopoDS_Shape& shape, const st
     return false;
 }
 
-int ApplicationInit::mergeDuplicateVerticesOnStepControlShapeAndExport(
+int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
     const std::string& filePath,
     const MergeDuplicateVertex::Params& params)
 {
     const std::filesystem::path mergeLogPath =
-        std::filesystem::path("assets") / "fixedDuplicateVertexStepControl" / "MergeDuplicateVertexStepControlLog.txt";
+        std::filesystem::path("assets") / "fixedDuplicateVertexStepShape" / "MergeDuplicateVertexStepShapeLog.txt";
     std::filesystem::create_directories(mergeLogPath.parent_path());
     {
         std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
         if (logFile) {
-            logFile << "MergeDuplicateVertex STEPControl shape log" << std::endl;
+            logFile << "MergeDuplicateVertex STEP shape log" << std::endl;
             logFile << "Output STEP: " << filePath << std::endl << std::endl;
         }
         else {
-            std::cerr << "Warning: Cannot open MergeDuplicateVertex STEPControl log file: "
+            std::cerr << "Warning: Cannot open MergeDuplicateVertex STEP shape log file: "
                       << mergeLogPath.string() << std::endl;
         }
     }
 
-    if (stepControlShape_.IsNull()) {
-        std::cerr << "Error: Cannot merge duplicate vertices because STEPControl shape is null." << std::endl;
+    if (importedStepShape_.IsNull()) {
+        std::cerr << "Error: Cannot merge duplicate vertices because imported STEP shape is null." << std::endl;
         return 0;
     }
 
     MergeDuplicateVertex duplicateVertexMerger(params);
-    duplicateVertexMerger.setInputShape(stepControlShape_);
+    duplicateVertexMerger.setInputShape(importedStepShape_);
     const int mergedCount = duplicateVertexMerger.perform();
 
     {
         std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
         if (logFile) {
-            logFile << "[MergeDuplicateVertex][STEPControl]"
+            logFile << "[MergeDuplicateVertex][StepShape]"
                     << " mergedCount=" << mergedCount
                     << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
-                    << ", inputShapeType=" << static_cast<int>(stepControlShape_.ShapeType())
+                    << ", inputShapeType=" << static_cast<int>(importedStepShape_.ShapeType())
                     << std::endl;
 
             const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
@@ -312,31 +436,105 @@ int ApplicationInit::mergeDuplicateVerticesOnStepControlShapeAndExport(
             logFile << std::endl;
         }
         else {
-            std::cerr << "Warning: Cannot append MergeDuplicateVertex STEPControl log file: "
+            std::cerr << "Warning: Cannot append MergeDuplicateVertex STEP shape log file: "
                       << mergeLogPath.string() << std::endl;
         }
     }
 
     TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
     if (processedShape.IsNull()) {
-        std::cerr << "Error: MergeDuplicateVertex produced a null STEPControl result shape." << std::endl;
+        std::cerr << "Error: MergeDuplicateVertex produced a null STEP shape result." << std::endl;
         return 0;
     }
 
-    if (processedShape.ShapeType() != stepControlShape_.ShapeType()) {
-        std::cerr << "Error: MergeDuplicateVertex changed STEPControl shape type from "
-                  << static_cast<int>(stepControlShape_.ShapeType()) << " to "
+    if (processedShape.ShapeType() != importedStepShape_.ShapeType()) {
+        std::cerr << "Error: MergeDuplicateVertex changed STEP shape type from "
+                  << static_cast<int>(importedStepShape_.ShapeType()) << " to "
                   << static_cast<int>(processedShape.ShapeType()) << "." << std::endl;
         return 0;
     }
 
-    stepControlShape_ = processedShape;
+    importedStepShape_ = processedShape;
 
-    if (!exportStepControlShape(stepControlShape_, filePath)) {
+    if (!exportStepShape(importedStepShape_, filePath)) {
         return -1;
     }
 
     return mergedCount;
+}
+
+int ApplicationInit::sewShellsOnStepShapeAndExport(
+    const std::string& filePath,
+    const SewShells::Params& params)
+{
+    const std::filesystem::path sewLogPath =
+        std::filesystem::path("assets") / "fixedSewShellsStepShape" / "SewShellsStepShapeLog.txt";
+    std::filesystem::create_directories(sewLogPath.parent_path());
+    {
+        std::ofstream logFile(sewLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "SewShells STEP shape log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open SewShells STEP shape log file: "
+                      << sewLogPath.string() << std::endl;
+        }
+    }
+
+    if (importedStepShape_.IsNull()) {
+        std::cerr << "Error: Cannot sew shells because imported STEP shape is null." << std::endl;
+        return 0;
+    }
+
+    SewShells shellSewer(params);
+    shellSewer.setInputShape(importedStepShape_);
+    const int sewedGroupCount = shellSewer.perform();
+
+    {
+        std::ofstream logFile(sewLogPath, std::ios::out | std::ios::app);
+        if (logFile) {
+            logFile << "[SewShells][StepShape]"
+                    << " sewedGroupCount=" << sewedGroupCount
+                    << ", modified=" << (shellSewer.isModified() ? "true" : "false")
+                    << ", inputShapeType=" << TopologyUtils::ShapeTypeName(importedStepShape_)
+                    << std::endl;
+
+            const std::vector<std::string>& messages = shellSewer.getMessages();
+            if (messages.empty()) {
+                logFile << "  (no messages)" << std::endl;
+            }
+            for (const std::string& message : messages) {
+                logFile << "  - " << message << std::endl;
+            }
+            logFile << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot append SewShells STEP shape log file: "
+                      << sewLogPath.string() << std::endl;
+        }
+    }
+
+    TopoDS_Shape processedShape = shellSewer.getResultShape();
+    if (processedShape.IsNull()) {
+        std::cerr << "Error: SewShells produced a null STEP shape result." << std::endl;
+        return 0;
+    }
+
+    if (processedShape.ShapeType() != importedStepShape_.ShapeType()) {
+        std::cerr << "Error: SewShells changed STEP shape type from "
+                  << TopologyUtils::ShapeTypeName(importedStepShape_) << " to "
+                  << TopologyUtils::ShapeTypeName(processedShape) << "." << std::endl;
+        return 0;
+    }
+
+    importedStepShape_ = processedShape;
+
+    if (!exportStepShape(importedStepShape_, filePath)) {
+        return -1;
+    }
+
+    return sewedGroupCount;
 }
 
 void ApplicationInit::collectTopLevelTargets(std::vector<EditableContainerTarget>& targets) const {
@@ -348,6 +546,9 @@ void ApplicationInit::collectTopLevelTargets(std::vector<EditableContainerTarget
     if (shapeTool.IsNull()) {
         return;
     }
+#ifdef _DEBUG
+    dumpShellCompoundParentDebug(aDoc_->Main());
+#endif
     TDF_LabelSequence topShapes;
     shapeTool->GetShapes(topShapes);
     

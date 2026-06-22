@@ -13,7 +13,7 @@ occt_vc14-64-with-debug/
 3rdparty-vc14-64/
 assets/
 results/
-feature/
+functionofclass/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

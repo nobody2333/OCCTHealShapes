@@ -50,6 +50,41 @@ int TopologyUtils::CountFreeEdges(const TopoDS_Shape& shape)
     return count;
 }
 
+const char* TopologyUtils::ShapeTypeName(TopAbs_ShapeEnum shapeType)
+{
+    switch (shapeType) {
+    case TopAbs_COMPOUND:
+        return "COMPOUND";
+    case TopAbs_COMPSOLID:
+        return "COMPSOLID";
+    case TopAbs_SOLID:
+        return "SOLID";
+    case TopAbs_SHELL:
+        return "SHELL";
+    case TopAbs_FACE:
+        return "FACE";
+    case TopAbs_WIRE:
+        return "WIRE";
+    case TopAbs_EDGE:
+        return "EDGE";
+    case TopAbs_VERTEX:
+        return "VERTEX";
+    case TopAbs_SHAPE:
+        return "SHAPE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+const char* TopologyUtils::ShapeTypeName(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return "NULL";
+    }
+
+    return ShapeTypeName(shape.ShapeType());
+}
+
 void TopologyUtils::RemoveDuplicateAncestors(TopTools_IndexedDataMapOfShapeListOfShape& map)
 {
     for (int i = 1; i <= map.Extent(); ++i) {

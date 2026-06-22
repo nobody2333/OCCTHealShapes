@@ -171,10 +171,10 @@ bool containsStatus(const std::vector<BRepCheck_Status>& statuses, BRepCheck_Sta
 
 bool statusesAreSubset(
     const std::vector<BRepCheck_Status>& statuses,
-    const std::vector<BRepCheck_Status>& baselineStatuses)
+    const std::vector<BRepCheck_Status>& existingStatuses)
 {
     for (const BRepCheck_Status status : statuses) {
-        if (!containsStatus(baselineStatuses, status)) {
+        if (!containsStatus(existingStatuses, status)) {
             return false;
         }
     }
@@ -232,17 +232,17 @@ std::vector<BRepCheckFailureInfo> collectBRepCheckFailures(
     return failures;
 }
 
-// 判断是否在 failure 是否已在 baselineFailures 存在
-bool isExistingBRepCheckFailure(
+// 判断 failure 是否属于修复前已经存在的 BRepCheck 问题。
+bool isPreExistingBRepCheckFailure(
     const BRepCheckFailureInfo& failure,
-    const std::vector<BRepCheckFailureInfo>& baselineFailures)
+    const std::vector<BRepCheckFailureInfo>& existingFailures)
 {
-    for (const BRepCheckFailureInfo& baseline : baselineFailures) {
-        if (failure.type != baseline.type || !failure.shape.IsSame(baseline.shape)) {
+    for (const BRepCheckFailureInfo& existingFailure : existingFailures) {
+        if (failure.type != existingFailure.type || !failure.shape.IsSame(existingFailure.shape)) {
             continue;
         }
 
-        if (statusesAreSubset(failure.statuses, baseline.statuses)) {
+        if (statusesAreSubset(failure.statuses, existingFailure.statuses)) {
             return true;
         }
     }
@@ -343,15 +343,16 @@ int HealNarrowGap::perform()
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
 
-        std::string baselineCheckError;
-        const std::vector<BRepCheckFailureInfo> baselineFailures = collectBRepCheckFailures(currentShape, &baselineCheckError);
-        if (!baselineCheckError.empty()) {
-            appendMessage(messages_, "Current shape BRepCheck failed: " + baselineCheckError);
+        std::string existingCheckError;
+        const std::vector<BRepCheckFailureInfo> existingFailures =
+            collectBRepCheckFailures(currentShape, &existingCheckError);
+        if (!existingCheckError.empty()) {
+            appendMessage(messages_, "Current shape BRepCheck failed: " + existingCheckError);
         }
-        else if (!baselineFailures.empty()) {
+        else if (!existingFailures.empty()) {
             std::ostringstream os;
             os << "Current shape has existing BRepCheck failures:"
-               << describeBRepCheckFailureList(baselineFailures);
+               << describeBRepCheckFailureList(existingFailures);
             appendMessage(messages_, os.str());
         }
 
@@ -1194,10 +1195,11 @@ bool HealNarrowGap::validateWholeShape(
         return false;
     }
 
-    std::string baselineError;
-    const std::vector<BRepCheckFailureInfo> baselineFailures = collectBRepCheckFailures(beforeShape, &baselineError);
-    if (!baselineError.empty()) {
-        errorMessage = "Baseline BRepCheck failed: " + baselineError;
+    std::string existingError;
+    const std::vector<BRepCheckFailureInfo> existingFailures =
+        collectBRepCheckFailures(beforeShape, &existingError);
+    if (!existingError.empty()) {
+        errorMessage = "Existing BRepCheck failure collection failed before replacement: " + existingError;
         return false;
     }
 
@@ -1210,7 +1212,7 @@ bool HealNarrowGap::validateWholeShape(
 
     std::vector<BRepCheckFailureInfo> newFailures;
     for (const BRepCheckFailureInfo& failure : repairedFailures) {
-        if (!isExistingBRepCheckFailure(failure, baselineFailures)) {
+        if (!isPreExistingBRepCheckFailure(failure, existingFailures)) {
             newFailures.push_back(failure);
         }
     }
@@ -1218,9 +1220,9 @@ bool HealNarrowGap::validateWholeShape(
     if (!newFailures.empty()) {
         errorMessage = "New BRepCheck failures after replacement:";
         errorMessage += describeBRepCheckFailureList(newFailures);
-        if (!baselineFailures.empty()) {
-            errorMessage += " baseline failures:";
-            errorMessage += describeBRepCheckFailureList(baselineFailures);
+        if (!existingFailures.empty()) {
+            errorMessage += " existing failures:";
+            errorMessage += describeBRepCheckFailureList(existingFailures);
         }
         return false;
     }

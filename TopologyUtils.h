@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
@@ -35,6 +36,16 @@ public:
     /// <param name="shape">需要统计的拓扑形状。</param>
     /// <returns>free edge 数量。</returns>
     static int CountFreeEdges(const TopoDS_Shape& shape);
+
+    /// <summary>
+    /// 将 OCCT shape type 枚举转换为便于日志输出的文字。
+    /// </summary>
+    static const char* ShapeTypeName(TopAbs_ShapeEnum shapeType);
+
+    /// <summary>
+    /// 获取 shape 的类型文字；空 shape 返回 NULL。
+    /// </summary>
+    static const char* ShapeTypeName(const TopoDS_Shape& shape);
 
 private:
     /// <summary>

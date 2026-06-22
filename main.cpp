@@ -12,6 +12,7 @@
 
 #include "ApplicationInit.h"
 #include "GeometryUtils.h"
+#include "SewShells.h"
 #include "TopoTools.h"
 #include "Viewer.h"
 
@@ -216,14 +217,14 @@ int mergeDuplicateVertex(const std::string& fileName) {
     return mergedCount;
 }
 
-int mergeDuplicateVertexByStepControl(const std::string& fileName) {
+int mergeDuplicateVertexOnStepShape(const std::string& fileName) {
     std::string inputFilePath = "./assets/" + fileName + ".stp";
-    std::filesystem::create_directories("./assets/fixedDuplicateVertexStepControl");
-    std::string outputFilePath = "./assets/fixedDuplicateVertexStepControl/MergeVertex_" + fileName + ".stp";
+    std::filesystem::create_directories("./assets/fixedDuplicateVertexStepShape");
+    std::string outputFilePath = "./assets/fixedDuplicateVertexStepShape/MergeVertex_" + fileName + ".stp";
     ApplicationInit appInit;
 
     auto t0 = std::chrono::system_clock::now();
-    if (!appInit.importStepControlShape(inputFilePath)) {
+    if (!appInit.importStepAsShape(inputFilePath)) {
         std::cerr << "Reading file by STEPControl_Reader failed: " << inputFilePath << std::endl;
         return -1;
     }
@@ -236,8 +237,8 @@ int mergeDuplicateVertexByStepControl(const std::string& fileName) {
     MergeDuplicateVertex::Params params;
     params.forbidAcrossDifferentSolids = false;
 
-    std::cout << "Merging duplicate vertices on STEPControl shape......" << std::endl;
-    const int mergedCount = appInit.mergeDuplicateVerticesOnStepControlShapeAndExport(outputFilePath, params);
+    std::cout << "Merging duplicate vertices on imported STEP shape......" << std::endl;
+    const int mergedCount = appInit.mergeDuplicateVerticesOnStepShapeAndExport(outputFilePath, params);
     if (mergedCount < 0) {
         std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
         return -1;
@@ -252,6 +253,49 @@ int mergeDuplicateVertexByStepControl(const std::string& fileName) {
         << " s" << std::endl;
 
     return mergedCount;
+}
+
+int sewShellsOnStepShape(const std::string& fileName) {
+    std::string inputFilePath = "./assets/" + fileName + ".stp";
+    std::filesystem::create_directories("./assets/fixedSewShellsStepShape");
+    std::string outputFilePath = "./assets/fixedSewShellsStepShape/SewShells_" + fileName + ".stp";
+    ApplicationInit appInit;
+
+    auto t0 = std::chrono::system_clock::now();
+    if (!appInit.importStepAsShape(inputFilePath)) {
+        std::cerr << "Reading file by STEPControl_Reader failed: " << inputFilePath << std::endl;
+        return -1;
+    }
+
+    auto t1 = std::chrono::system_clock::now();
+    std::cout << "STEPControl_Reader cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count()
+        << " s" << std::endl;
+
+    SewShells::Params params;
+    params.nonManifoldMode = true;
+    params.floatingEdgesMode = true;
+    params.runShapeFixAfterSewing = true;
+	params.rejectInvalidResult = false;
+    params.sewingTolerance = 1.0e-2;
+    params.maxTolerance = 1.0e-2;
+	params.discardLooseTopLevelSubshapesAfterSewing = true;
+    std::cout << "Sewing shells on imported STEP shape......" << std::endl;
+    const int sewedGroupCount = appInit.sewShellsOnStepShapeAndExport(outputFilePath, params);
+    if (sewedGroupCount < 0) {
+        std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
+        return -1;
+    }
+
+    std::cout << "Sewed shell group count: " << sewedGroupCount << std::endl;
+    std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+
+    auto t2 = std::chrono::system_clock::now();
+    std::cout << "Total cost: "
+        << std::chrono::duration_cast<std::chrono::seconds>(t2 - t0).count()
+        << " s" << std::endl;
+
+    return sewedGroupCount;
 }
 
 int mergeDuplicateVertexAndHealNarrowGap(const std::string& fileName) {
@@ -311,7 +355,9 @@ int main()
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);
     //mergeDuplicateVertex(fileName);
-    mergeDuplicateVertexByStepControl(fileName);
+    //mergeDuplicateVertexOnStepShape(fileName);
+    //sewShellsOnStepShape(fileName);
     //mergeDuplicateVertexAndHealNarrowGap(fileName);
+	sewShellsOnStepShape("h6k");
     return 0;
 }

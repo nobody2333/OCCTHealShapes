@@ -27,7 +27,7 @@
     <ClCompile Include="TopoTools.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="convertToVTKTest.cpp">
+    <ClCompile Include="main.cpp">
       <Filter>main文件</Filter>
     </ClCompile>
     <ClCompile Include="MergeShortEdge.cpp">
@@ -49,6 +49,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="MergeDuplicateVertex.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="SewShells.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
@@ -81,6 +84,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="MergeDuplicateVertex.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SewShells.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
