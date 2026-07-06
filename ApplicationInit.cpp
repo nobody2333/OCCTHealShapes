@@ -1069,6 +1069,120 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
     return repairedCount;
 }
 
+int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
+    const std::string& filePath,
+    const HealClosedNarrowGap::Params& params)
+{
+    const std::filesystem::path healLogPath =
+        std::filesystem::path("assets") / "fixedClosedGap" / "HealClosedGapsLog.txt";
+    std::filesystem::create_directories(healLogPath.parent_path());
+    {
+        std::ofstream logFile(healLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "HealClosedNarrowGap log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open HealClosedNarrowGap log file: "
+                      << healLogPath.string() << std::endl;
+        }
+    }
+
+    if (aDoc_.IsNull()) {
+        std::cerr << "Error: Cannot heal closed gaps because the XCAF document is null." << std::endl;
+        return 0;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) {
+        std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        return 0;
+    }
+
+    std::vector<EditableContainerTarget> targets;
+    collectTopLevelTargets(targets);
+    if (targets.empty()) {
+        std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        return 0;
+    }
+
+    int repairedCount = 0;
+    int replacedCount = 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const EditableContainerTarget& target = targets[i];
+        if (target.ownerLabel.IsNull()) {
+            std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            continue;
+        }
+
+        const TopoDS_Shape currentShape = shapeTool->GetShape(target.ownerLabel);
+        const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
+        if (originalShape.IsNull()) {
+            std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            continue;
+        }
+
+        HealClosedNarrowGap closedGapHealer(params);
+        closedGapHealer.setInputShape(originalShape);
+        const int containerRepairedCount = closedGapHealer.perform();
+
+        {
+            std::ofstream logFile(healLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[HealClosedNarrowGap] Container " << i
+                        << ", repairedCount=" << containerRepairedCount
+                        << ", modified=" << (closedGapHealer.isModified() ? "true" : "false")
+                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
+                        << std::endl;
+
+                const std::vector<std::string>& messages = closedGapHealer.getMessages();
+                if (messages.empty()) {
+                    logFile << "  (no messages)" << std::endl;
+                }
+                for (const std::string& message : messages) {
+                    logFile << "  - " << message << std::endl;
+                }
+                logFile << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append HealClosedNarrowGap log file: "
+                          << healLogPath.string() << std::endl;
+            }
+        }
+
+        TopoDS_Shape processedShape = closedGapHealer.getResultShape();
+        if (processedShape.IsNull()) {
+            std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            continue;
+        }
+
+        if (processedShape.ShapeType() != originalShape.ShapeType()) {
+            std::cerr << "Container " << i << " changed shape type from "
+                      << static_cast<int>(originalShape.ShapeType()) << " to "
+                      << static_cast<int>(processedShape.ShapeType())
+                      << ", keep original shape." << std::endl;
+            continue;
+        }
+
+        if (!closedGapHealer.isModified()) {
+            continue;
+        }
+
+        shapeTool->SetShape(target.ownerLabel, processedShape);
+        repairedCount += containerRepairedCount;
+        ++replacedCount;
+    }
+
+    shapeTool->UpdateAssemblies();
+    refreshShapeCache();
+    std::cout << "Replaced lowest containers after closed-gap heal: " << replacedCount << std::endl;
+    if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        return -1;
+    }
+
+    return repairedCount;
+}
+
 bool ApplicationInit::writeXcafDocumentStep(const Handle(TDocStd_Document)& doc,
                                             const std::string& filePath,
                                             bool preserveAssembly) const

@@ -7,9 +7,10 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <gp_Pnt.hxx>
 
 // 处理由 face 边界组成的闭合多边细缝。
-// 第一版只处理由单面边界 edge 组成的闭合 loop，并尝试用一侧 edge chain 替换另一侧 edge chain。
+// 第一版识别由单面边界 edge 组成的闭合 loop，并优先尝试用中线 edge chain 收缩两侧边界。
 class HealClosedNarrowGap {
 public:
     struct Params {
@@ -23,6 +24,12 @@ public:
         double maxTipAngle = 35.0 * 3.14159265358979323846 / 180.0;
         // 对两侧 chain 做同步采样的点数。
         int sampleCount = 20;
+        // 为 true 时，优先用两侧采样点中线构造新 edge chain，同时替换两侧 chain。
+        bool useMidlineCollapse = true;
+        // 中线收缩失败时，是否回退到“一侧 chain 替换另一侧 chain”的保守方案。
+        bool fallbackToSideReplacement = true;
+        // 中线 edge 补建 pcurve、重建 face 时使用的局部几何容差。
+        double midlineRepairTolerance = 1.0e-4;
         // 为 true 时优先保留总长度较长的 chain；否则优先保留 edge 数更少的 chain。
         bool preferLongerChainToKeep = true;
         // 为 true 时，替换后运行 ShapeFix_Shape 做整体后处理。
@@ -103,7 +110,40 @@ private:
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
+    bool tryRepairByMidlineCollapse(
+        const TopoDS_Shape& currentShape,
+        const ClosedGapCandidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
+    bool tryRepairBySideReplacement(
+        const TopoDS_Shape& currentShape,
+        const ClosedGapCandidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
     ChainChoice chooseChainToKeep(const ClosedGapCandidate& candidate) const;
+    bool sampleChainPoint(const EdgeChain& chain, double normalized, gp_Pnt& point) const;
+    bool buildMidlineChain(
+        const ClosedGapCandidate& candidate,
+        EdgeChain& midlineChain,
+        std::string& errorMessage) const;
+
+    bool rebuildFacesByCollapsingToMidline(
+        const TopoDS_Shape& currentShape,
+        const ClosedGapCandidate& candidate,
+        const EdgeChain& midlineChain,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage) const;
+
+    bool rebuildFaceByReplacingChainWithChain(
+        const TopoDS_Face& faceToRebuild,
+        const EdgeChain& sourceChain,
+        const EdgeChain& replacementChain,
+        double tolerance,
+        TopoDS_Face& rebuiltFace,
+        std::string& errorMessage) const;
+
     bool rebuildFacesByReplacingChain(
         const TopoDS_Shape& currentShape,
         const EdgeChain& keptChain,
@@ -127,6 +167,11 @@ private:
         std::string& errorMessage) const;
 
     int computeAutomaticIterationLimit(const TopoDS_Shape& shape) const;
+    bool findContiguousChainInWire(
+        const std::vector<TopoDS_Edge>& wireEdges,
+        const EdgeChain& chain,
+        int& startIndex,
+        bool& reversedOrder) const;
     int findSameEdgeIndex(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge) const;
     bool ensurePCurveOnFace(TopoDS_Edge& edge, const TopoDS_Face& face, double tolerance, std::string& errorMessage) const;
     void appendMessage(const std::string& message);

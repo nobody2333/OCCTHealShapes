@@ -17,6 +17,7 @@
 
 #include "MergeShortEdge.h"
 #include "HealNarrowGap.h"
+#include "HealClosedNarrowGap.h"
 #include "MergeDuplicateVertex.h"
 #include "SewShells.h"
 
@@ -48,6 +49,9 @@ public:
                                                    double angleThresholdDeg);
     int healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
                                                   const HealNarrowGap::Params& params = HealNarrowGap::Params());
+    int healClosedGapsOnLowestContainersAndExport(
+        const std::string& filePath,
+        const HealClosedNarrowGap::Params& params = HealClosedNarrowGap::Params());
     int mergeDuplicateVerticesOnLowestContainersAndExport(
         const std::string& filePath,
         const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params());
