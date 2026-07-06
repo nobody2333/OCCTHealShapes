@@ -21,6 +21,8 @@
 #include <BRepCheck_Status.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools_ReShape.hxx>
+#include <Extrema_ExtPC.hxx>
+#include <Extrema_POnCurv.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
@@ -303,7 +305,26 @@ bool findFacesForSameEdge(const TopTools_IndexedDataMapOfShapeListOfShape& edgeF
 HealNarrowGap::HealNarrowGap(const Params& params)
     : myParams(params)
 {
+    myParams.candidateMaxGap = std::max(myParams.candidateMaxGap, Precision::Confusion());
+    if (myParams.repairMaxGap <= 0.0) {
+        myParams.repairMaxGap = myParams.candidateMaxGap;
+    }
+    else {
+        myParams.repairMaxGap = std::max(myParams.repairMaxGap, Precision::Confusion());
+    }
+
+    myParams.pcurveTol = std::max(myParams.pcurveTol, Precision::Confusion());
+    myParams.maxPCurveTol = std::max(myParams.maxPCurveTol, myParams.pcurveTol);
+    myParams.faceTol = std::max(myParams.faceTol, Precision::Confusion());
+    myParams.maxFaceTol = std::max(myParams.maxFaceTol, myParams.faceTol);
+    myParams.shapeFixPrecision = std::max(myParams.shapeFixPrecision, Precision::Confusion());
+    myParams.shapeFixMaxTolerance = std::max(myParams.shapeFixMaxTolerance, myParams.shapeFixPrecision);
     myParams.sampleCount = std::max(2, myParams.sampleCount);
+    myParams.minSampleCount = std::max(2, myParams.minSampleCount);
+    myParams.maxSampleCount = std::max(myParams.minSampleCount, myParams.maxSampleCount);
+    if (myParams.targetSampleSpacing <= Precision::Confusion()) {
+        myParams.useAdaptiveSampleCount = false;
+    }
     myParams.minLengthRatio = Clamp01(myParams.minLengthRatio);
 }
 
@@ -356,7 +377,7 @@ int HealNarrowGap::perform()
             appendMessage(messages_, os.str());
         }
 
-        // candidates 是本轮从当前形状重新提取的候选，避免基于过期拓扑批量提交。
+        // candidates 是本轮从当前形状重新提取的候选，避免基于过期拓扑批量修改。
         std::vector<Candidate> candidates = extractCandidatePairs(currentShape, edgeFaceMap, messages_);
         std::sort(
             candidates.begin(),
@@ -383,7 +404,14 @@ int HealNarrowGap::perform()
             // errorMessage 记录当前候选失败原因，失败后继续尝试下一候选。
             std::string errorMessage;
             if (!tryRepairCandidate(currentShape, candidate, repairedShape, errorMessage)) {
-                appendMessage(messages_, "Candidate failed: " + errorMessage);
+                std::ostringstream failStream;
+                failStream << "Candidate failed: maxGap=" << candidate.maxGap
+                           << ", meanGap=" << candidate.meanGap
+                           << ", lengthRatio=" << candidate.lengthRatio
+                           << ", tangentScore=" << candidate.tangentScore
+                           << ", sampleCount=" << candidate.usedSampleCount
+                           << ", reason=" << errorMessage;
+                appendMessage(messages_, failStream.str());
                 continue;
             }
 
@@ -398,7 +426,12 @@ int HealNarrowGap::perform()
                << ", maxGap=" << candidate.maxGap
                << ", meanGap=" << candidate.meanGap
                << ", lengthRatio=" << candidate.lengthRatio
-               << ", tangentScore=" << candidate.tangentScore;
+               << ", tangentScore=" << candidate.tangentScore
+               << ", sampleCount=" << candidate.usedSampleCount
+               << ", candidateMaxGap=" << myParams.candidateMaxGap
+               << ", repairMaxGap=" << myParams.repairMaxGap
+               << ", shapeFixPrecision=" << myParams.shapeFixPrecision
+               << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
             appendMessage(messages_, os.str());
             break;
         }
@@ -568,6 +601,7 @@ bool HealNarrowGap::isDegeneratedEdge(const TopoDS_Edge& edge) const
 {
     if (edge.IsNull()) {
         return true;
+
     }
 
     try {
@@ -630,6 +664,31 @@ bool HealNarrowGap::has3DCurve(const TopoDS_Edge& edge) const
     }
 }
 
+int HealNarrowGap::computeSampleCountForCandidate(const Candidate& candidate) const
+{
+    const int fixedSampleCount = std::max(2, myParams.sampleCount);
+    if (!myParams.useAdaptiveSampleCount) {
+        return fixedSampleCount;
+    }
+
+    const double length = std::max(candidate.lengthA, candidate.lengthB);
+    if (length <= Precision::Confusion()) {
+        return fixedSampleCount;
+    }
+
+    if (myParams.targetSampleSpacing <= Precision::Confusion()) {
+        return fixedSampleCount;
+    }
+
+    const double spacing = std::max(myParams.targetSampleSpacing, Precision::Confusion());
+    // +1 用于包含首尾端点。
+    const int countByLength = static_cast<int>(std::ceil(length / spacing)) + 1;
+
+    return std::max(
+        myParams.minSampleCount,
+        std::min(myParams.maxSampleCount, countByLength));
+}
+
 // 按共享端点在各自 edge 上的曲线参数建立对应采样，评估间隙和切向一致性。
 bool HealNarrowGap::evaluateGeometricSimilarity(
     Candidate& candidate,
@@ -643,7 +702,7 @@ bool HealNarrowGap::evaluateGeometricSimilarity(
         TopoDS_Vertex bEnd;
         if (!getEdgeVerticesOriented(candidate.edgeA, aStart, aEnd) ||
             !getEdgeVerticesOriented(candidate.edgeB, bStart, bEnd)) {
-            errorMessage = "failed to get oriented edge vertices";
+            errorMessage = "Failed to get oriented edge vertices";
             return false;
         }
 
@@ -659,7 +718,7 @@ bool HealNarrowGap::evaluateGeometricSimilarity(
             bParamEndVertex = bStart;
         }
         else {
-            errorMessage = "vertex pair mismatch";
+            errorMessage = "Vertex pair mismatch";
             return false;
         }
 
@@ -673,72 +732,181 @@ bool HealNarrowGap::evaluateGeometricSimilarity(
         BRepAdaptor_Curve curveA(candidate.edgeA);
         BRepAdaptor_Curve curveB(candidate.edgeB);
 
-        // 实际采样点数至少为 2，包含两端点。
-        const int sampleCount = std::max(2, myParams.sampleCount);
+        // 实际采样点数至少为 2，包含两端点；可按候选边长自适应增加。
+        const int sampleCount = computeSampleCountForCandidate(candidate);
+        candidate.usedSampleCount = sampleCount;
         // tangentLimit 是允许夹角对应的最小 abs(dot)。
         const double tangentLimit = std::cos(std::max(0.0, myParams.maxTangentAngle));
         // 参数递减采样时，D1 导数方向需要反转成实际采样行进方向。
         const bool reverseTangentA = uA1 < uA0;
         const bool reverseTangentB = uB1 < uB0;
 
-        // gapSum 用于计算平均间隙；maxGap 记录最大采样间隙。
-        double gapSum = 0.0;
-        double maxGap = 0.0;
-        // minAbsDot 记录所有采样点中最差的切向一致性。
-        double minAbsDot = 1.0;
+        const auto nearestDistanceToCurve = [](
+            const gp_Pnt& point,
+            BRepAdaptor_Curve& targetCurve,
+            double& nearestParameter,
+            double& nearestDistance) {
+            nearestParameter = targetCurve.FirstParameter();
+            nearestDistance = std::numeric_limits<double>::max();
+
+            Extrema_ExtPC extrema(
+                point,
+                targetCurve,
+                targetCurve.FirstParameter(),
+                targetCurve.LastParameter(),
+                Precision::PConfusion());
+
+            if (extrema.IsDone()) {
+                for (int extIndex = 1; extIndex <= extrema.NbExt(); ++extIndex) {
+                    const double squareDistance = extrema.SquareDistance(extIndex);
+                    if (squareDistance < nearestDistance * nearestDistance) {
+                        nearestDistance = std::sqrt(std::max(0.0, squareDistance));
+                        nearestParameter = extrema.Point(extIndex).Parameter();
+                    }
+                }
+
+                Standard_Real firstSquareDistance = 0.0;
+                Standard_Real lastSquareDistance = 0.0;
+                gp_Pnt firstPoint;
+                gp_Pnt lastPoint;
+                extrema.TrimmedSquareDistances(firstSquareDistance, lastSquareDistance, firstPoint, lastPoint);
+                if (firstSquareDistance < nearestDistance * nearestDistance) {
+                    nearestDistance = std::sqrt(std::max(0.0, firstSquareDistance));
+                    nearestParameter = targetCurve.FirstParameter();
+                }
+                if (lastSquareDistance < nearestDistance * nearestDistance) {
+                    nearestDistance = std::sqrt(std::max(0.0, lastSquareDistance));
+                    nearestParameter = targetCurve.LastParameter();
+                }
+            }
+
+            if (!std::isfinite(nearestDistance) || nearestDistance == std::numeric_limits<double>::max()) {
+                constexpr int fallbackSamples = 32;
+                for (int sample = 0; sample < fallbackSamples; ++sample) {
+                    const double t = static_cast<double>(sample) / static_cast<double>(fallbackSamples - 1);
+                    const double param = targetCurve.FirstParameter()
+                        + (targetCurve.LastParameter() - targetCurve.FirstParameter()) * t;
+                    const gp_Pnt candidatePoint = targetCurve.Value(param);
+                    const double distance = point.Distance(candidatePoint);
+                    if (distance < nearestDistance) {
+                        nearestDistance = distance;
+                        nearestParameter = param;
+                    }
+                }
+            }
+
+            return std::isfinite(nearestDistance) && nearestDistance < std::numeric_limits<double>::max();
+        };
+
+        const auto updateTangentScore = [](
+            gp_Vec sourceTangent,
+            gp_Vec targetTangent,
+            bool reverseSource,
+            bool reverseTarget,
+            double& minAbsDot) {
+            if (reverseSource) {
+                sourceTangent.Reverse();
+            }
+            if (reverseTarget) {
+                targetTangent.Reverse();
+            }
+
+            if (sourceTangent.SquareMagnitude() <= Precision::SquareConfusion() ||
+                targetTangent.SquareMagnitude() <= Precision::SquareConfusion()) {
+                return;
+            }
+
+            sourceTangent.Normalize();
+            targetTangent.Normalize();
+            const double absDot = std::abs(sourceTangent.Dot(targetTangent));
+            minAbsDot = std::min(minAbsDot, Clamp01(absDot));
+        };
+
+        // 双向最近距离可以避免两条 edge 参数分布不一致时的错误对应。
+        double bidirectionalGapSum = 0.0;
+        double bidirectionalMaxGap = 0.0;
+        double maxGapAToB = 0.0;
+        double maxGapBToA = 0.0;
+        double projectedTangentScore = 1.0;
+        int projectedSampleCount = 0;
 
         for (int i = 0; i < sampleCount; ++i) {
-            // t 是归一化采样参数。
-            const double t = sampleCount == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(sampleCount - 1);
-            // paramA/paramB 是根据对应端点参数插值得到的实际曲线参数。
+            const double t = static_cast<double>(i) / static_cast<double>(sampleCount - 1);
             const double paramA = uA0 + (uA1 - uA0) * t;
-            const double paramB = uB0 + (uB1 - uB0) * t;
 
-            // pointA/pointB 是采样点；tangentA/tangentB 是对应一阶导。
             gp_Pnt pointA;
-            gp_Pnt pointB;
             gp_Vec tangentA;
-            gp_Vec tangentB;
             curveA.D1(paramA, pointA, tangentA);
-            curveB.D1(paramB, pointB, tangentB);
-            if (reverseTangentA) {
-                tangentA.Reverse();
-            }
-            if (reverseTangentB) {
-                tangentB.Reverse();
+
+            double nearestParamB = 0.0;
+            double nearestDistanceB = 0.0;
+            if (!nearestDistanceToCurve(pointA, curveB, nearestParamB, nearestDistanceB)) {
+                errorMessage = "Failed to project edgeA sample to edgeB";
+                return false;
             }
 
-            // gap 是当前采样点之间的 3D 距离。
-            const double gap = pointA.Distance(pointB);
-            gapSum += gap;
-            maxGap = std::max(maxGap, gap);
+            gp_Pnt projectedPointB;
+            gp_Vec projectedTangentB;
+            curveB.D1(nearestParamB, projectedPointB, projectedTangentB);
+            updateTangentScore(tangentA, projectedTangentB, reverseTangentA, reverseTangentB, projectedTangentScore);
 
-            if (tangentA.SquareMagnitude() > Precision::SquareConfusion() &&
-                tangentB.SquareMagnitude() > Precision::SquareConfusion()) {
-                tangentA.Normalize();
-                tangentB.Normalize();
-                // absDot 允许两条边方向相反，只关心切线夹角大小。
-                const double absDot = std::abs(tangentA.Dot(tangentB));
-                minAbsDot = std::min(minAbsDot, Clamp01(absDot));
-            }
+            maxGapAToB = std::max(maxGapAToB, nearestDistanceB);
+            bidirectionalMaxGap = std::max(bidirectionalMaxGap, nearestDistanceB);
+            bidirectionalGapSum += nearestDistanceB;
+            ++projectedSampleCount;
         }
 
-        candidate.meanGap = gapSum / static_cast<double>(sampleCount);
-        candidate.maxGap = maxGap;
-        candidate.tangentScore = minAbsDot;
+        for (int i = 0; i < sampleCount; ++i) {
+            const double t = static_cast<double>(i) / static_cast<double>(sampleCount - 1);
+            const double paramB = uB0 + (uB1 - uB0) * t;
 
-        if (candidate.maxGap > myParams.maxGap) {
-            errorMessage = "max gap too large";
+            gp_Pnt pointB;
+            gp_Vec tangentB;
+            curveB.D1(paramB, pointB, tangentB);
+
+            double nearestParamA = 0.0;
+            double nearestDistanceA = 0.0;
+            if (!nearestDistanceToCurve(pointB, curveA, nearestParamA, nearestDistanceA)) {
+                errorMessage = "Failed to project edgeB sample to edgeA";
+                return false;
+            }
+
+            gp_Pnt projectedPointA;
+            gp_Vec projectedTangentA;
+            curveA.D1(nearestParamA, projectedPointA, projectedTangentA);
+            updateTangentScore(tangentB, projectedTangentA, reverseTangentB, reverseTangentA, projectedTangentScore);
+
+            maxGapBToA = std::max(maxGapBToA, nearestDistanceA);
+            bidirectionalMaxGap = std::max(bidirectionalMaxGap, nearestDistanceA);
+            bidirectionalGapSum += nearestDistanceA;
+            ++projectedSampleCount;
+        }
+
+        candidate.meanGap = projectedSampleCount > 0
+            ? bidirectionalGapSum / static_cast<double>(projectedSampleCount)
+            : 0.0;
+        candidate.maxGap = bidirectionalMaxGap;
+        candidate.tangentScore = projectedTangentScore;
+
+        if (candidate.maxGap > myParams.candidateMaxGap) {
+            std::ostringstream os;
+            os << "Candidate gap too large: edgeAtoB=" << maxGapAToB
+               << ", edgeBtoA=" << maxGapBToA
+               << ", sampleCount=" << sampleCount
+               << ", candidateMaxGap=" << myParams.candidateMaxGap;
+            errorMessage = os.str();
             return false;
         }
 
         if (candidate.tangentScore + Precision::Confusion() < tangentLimit) {
-            errorMessage = "tangent mismatch";
+            errorMessage = "Tangent mismatch";
             return false;
         }
+
+        return true;
     }
     catch (Standard_Failure& failure) {
-        errorMessage = "curve sampling failed: " + failureText(failure);
+        errorMessage = "Curve sampling failed: " + failureText(failure);
         return false;
     }
 
@@ -748,11 +916,11 @@ bool HealNarrowGap::evaluateGeometricSimilarity(
 // 将几何指标转换为可排序的综合置信度。
 double HealNarrowGap::computeCandidateConfidence(const Candidate& candidate) const
 {
-    // maxGapDenom 防止 maxGap 参数过小导致除零。
-    const double maxGapDenom = std::max(myParams.maxGap, Precision::Confusion());
+    // gapDenom 只使用候选边距离阈值，避免修复容差影响 edge-edge gap 评分。
+    const double gapDenom = std::max(myParams.candidateMaxGap, Precision::Confusion());
     // 间隙越小分数越高。
-    const double maxGapScore = 1.0 - Clamp01(candidate.maxGap / maxGapDenom);
-    const double meanGapScore = 1.0 - Clamp01(candidate.meanGap / maxGapDenom);
+    const double maxGapScore = 1.0 - Clamp01(candidate.maxGap / gapDenom);
+    const double meanGapScore = 1.0 - Clamp01(candidate.meanGap / gapDenom);
     // 长度和切向越接近理想值分数越高。
     const double lengthScore = Clamp01(candidate.lengthRatio);
     const double tangentScore = Clamp01(candidate.tangentScore);
@@ -821,6 +989,15 @@ bool HealNarrowGap::tryRepairCandidate(
         return false;
     }
 
+    if (candidate.maxGap > myParams.repairMaxGap) {
+        std::ostringstream os;
+        os << "repair gap too large: maxGap=" << candidate.maxGap
+           << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        errorMessage = os.str();
+        return false;
+    }
+
     // freeEdgesBefore 用于保证局部修复不会增加自由边数量。
     const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
     // choice 决定保留哪条边、重建哪个面。
@@ -831,13 +1008,23 @@ bool HealNarrowGap::tryRepairCandidate(
         return false;
     }
 
-    // pcurveTol 是补建 pcurve 和 same-parameter 的保守容差。
-    const double pcurveTol = std::max({
+    // pcurveTol 只用于 pcurve 修复/检查，不随候选细缝宽度放大。
+    const double existingEdgeTol = std::max({
         Precision::Confusion(),
         BRep_Tool::Tolerance(choice.keptEdge),
-        BRep_Tool::Tolerance(choice.edgeToReplace),
-        myParams.maxGap
+        BRep_Tool::Tolerance(choice.edgeToReplace)
         });
+    const double pcurveTol = std::min(
+        std::max(existingEdgeTol * 5.0, myParams.pcurveTol),
+        myParams.maxPCurveTol);
+
+    // faceTol 只用于重建 face 和局部 wire/face 修复，不使用 edge-edge gap。
+    const double existingFaceTol = std::max(
+        Precision::Confusion(),
+        BRep_Tool::Tolerance(choice.faceToRebuild));
+    const double faceTol = std::min(
+        std::max(existingFaceTol, myParams.faceTol),
+        myParams.maxFaceTol);
 
     TopoDS_Edge keptEdgeInFixedWire;
     if (!findEdgeUseInFaceWire(choice.fixedFace,
@@ -872,7 +1059,7 @@ bool HealNarrowGap::tryRepairCandidate(
         choice.faceToRebuild,
         choice.edgeToReplace,
         keptEdgeInFixedWire,
-        pcurveTol,
+        faceTol,
         rebuiltFace,
         errorMessage)) {
         return false;
@@ -952,9 +1139,11 @@ bool HealNarrowGap::tryRepairCandidate(
 
     if (myParams.runShapeFixAfterRepair) {
         try {
+            const double fixPrecision = std::max(Precision::Confusion(), myParams.shapeFixPrecision);
+            const double fixMaxTol = std::max(fixPrecision, myParams.shapeFixMaxTolerance);
             ShapeFix_Shape fixer(trialShape);
-            fixer.SetPrecision(std::max(Precision::Confusion(), myParams.maxGap));
-            fixer.SetMaxTolerance(std::max(Precision::Confusion(), myParams.maxGap * 10.0));
+            fixer.SetPrecision(fixPrecision);
+            fixer.SetMaxTolerance(fixMaxTol);
             fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
             fixer.FixFaceTool()->FixMissingSeamMode() = 1;
             fixer.Perform();
@@ -974,6 +1163,20 @@ bool HealNarrowGap::tryRepairCandidate(
         return false;
     }
 
+    {
+        std::ostringstream os;
+        os << "Candidate repair accepted: candidateMaxGap=" << myParams.candidateMaxGap
+           << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", candidate.maxGap=" << candidate.maxGap
+           << ", candidate.meanGap=" << candidate.meanGap
+           << ", sampleCount=" << candidate.usedSampleCount
+           << ", pcurveTol=" << pcurveTol
+           << ", faceTol=" << faceTol
+           << ", shapeFixPrecision=" << myParams.shapeFixPrecision
+           << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
+        appendMessage(messages_, os.str());
+    }
+
     repairedShape = trialShape;
     return true;
 }
@@ -987,7 +1190,7 @@ bool HealNarrowGap::findEdgeUseInFaceWire(
 {
     oldEdgeInWire.Nullify();
     if (oldFace.IsNull() || oldEdge.IsNull()) {
-        errorMessage = "invalid face or edge for edge replacement check";
+        errorMessage = "Invalid face or edge for edge replacement check";
         return false;
     }
 
@@ -1006,11 +1209,11 @@ bool HealNarrowGap::findEdgeUseInFaceWire(
         }
     }
     catch (Standard_Failure& failure) {
-        errorMessage = "failed to find replacement edge in face: " + failureText(failure);
+        errorMessage = "Failed to find replacement edge in face: " + failureText(failure);
         return false;
     }
 
-    errorMessage = "old edge not found in face";
+    errorMessage = "Old edge not found in face";
     return false;
 }
 
@@ -1018,7 +1221,7 @@ bool HealNarrowGap::rebuildFaceByReplacingEdge(
     const TopoDS_Face& faceToRebuild,
     const TopoDS_Edge& edgeToReplace,
     const TopoDS_Edge& replacementEdgeUse,
-    double tol,
+    double faceTol,
     TopoDS_Face& rebuiltFace,
     std::string& errorMessage) const
 {
@@ -1038,12 +1241,6 @@ bool HealNarrowGap::rebuildFaceByReplacingEdge(
             errorMessage = "Replaced face has no support surface";
             return false;
         }
-
-        const double faceTol = std::max({
-            Precision::Confusion(),
-            BRep_Tool::Tolerance(faceToRebuild),
-            tol
-        });
 
         BRep_Builder builder;
         TopoDS_Face rebuilt;
@@ -1125,7 +1322,7 @@ bool HealNarrowGap::rebuildFaceByReplacingEdge(
 
         ShapeFix_Face faceFix(rebuilt);
         faceFix.SetPrecision(faceTol);
-        faceFix.SetMaxTolerance(std::max(faceTol, myParams.maxGap * 10.0));
+        faceFix.SetMaxTolerance(std::max(faceTol, myParams.maxFaceTol));
         faceFix.FixWireMode() = 1;
         faceFix.FixOrientationMode() = 1;
         faceFix.FixMissingSeamMode() = 1;
@@ -1163,7 +1360,7 @@ bool HealNarrowGap::ensurePCurveOnFace(
     std::string& errorMessage) const
 {
     if (edge.IsNull() || face.IsNull()) {
-        errorMessage = "edge or face is null";
+        errorMessage = "Edge or face is null";
         return false;
     }
 
@@ -1268,13 +1465,16 @@ bool HealNarrowGap::validateEdgeReplacement(
             continue;
         }
 
-        const double pcurveTol = std::max({
+        const double existingTol = std::max({
             Precision::Confusion(),
             BRep_Tool::Tolerance(keptEdge),
             BRep_Tool::Tolerance(face)
         });
+        const double pcurveCheckTol = std::min(
+            std::max(existingTol * 5.0, myParams.pcurveTol),
+            myParams.maxPCurveTol);
         std::string localError;
-        if (!GeometryUtils::HasValidPCurveOnFace(keptEdge, face, pcurveTol, &localError)) {
+        if (!GeometryUtils::HasValidPCurveOnFace(keptEdge, face, pcurveCheckTol, &localError)) {
             errorMessage = "Kept edge pcurve invalid after edge replacement: " + localError;
             return false;
         }
@@ -1291,7 +1491,7 @@ void HealNarrowGap::appendMessage(std::vector<std::string>& messages, const std:
 
 // Manual verification:
 // Positive case: two distinct one-face edges sharing the same vertex pair and
-// whose sampled 3D gap is below Params::maxGap should yield Perform()>0,
+// whose bidirectional nearest gap is below Params::repairMaxGap should yield Perform()>0,
 // isModified()==true, two faces sharing the kept TopoDS_Edge, and a valid BRep.
-// Negative case: if the sampled middle gap is greater than Params::maxGap,
+// Negative case: if the bidirectional nearest gap is greater than Params::candidateMaxGap,
 // Perform should return 0 and leave isModified()==false.

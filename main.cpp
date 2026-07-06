@@ -353,11 +353,11 @@ int main()
     std::string fileName = "h6k";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
-    //healNarrowGap(fileName);
+    healNarrowGap(fileName);
     //mergeDuplicateVertex(fileName);
     //mergeDuplicateVertexOnStepShape(fileName);
     //sewShellsOnStepShape(fileName);
     //mergeDuplicateVertexAndHealNarrowGap(fileName);
-	sewShellsOnStepShape("h6k");
+	//sewShellsOnStepShape("h6k");
     return 0;
 }

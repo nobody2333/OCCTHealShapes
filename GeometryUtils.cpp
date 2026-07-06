@@ -269,7 +269,7 @@ bool GeometryUtils::RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
 {
     if (edge.IsNull() || face.IsNull()) {
         if (errorMessage != nullptr) {
-            *errorMessage = "edge or face is null";
+            *errorMessage = "Edge or face is null";
         }
         return false;
     }

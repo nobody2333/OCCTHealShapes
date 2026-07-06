@@ -146,6 +146,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ApplicationInit.cpp" />
+    <ClCompile Include="HealClosedNarrowGap.cpp" />
     <ClCompile Include="main.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
@@ -170,6 +171,7 @@
   <ItemGroup>
     <ClInclude Include="ApplicationInit.h" />
     <ClInclude Include="GeometryUtils.h" />
+    <ClInclude Include="HealClosedNarrowGap.h" />
     <ClInclude Include="HealNarrowGap.h" />
     <ClInclude Include="Logger.h" />
     <ClInclude Include="MergeDuplicateVertex.h" />

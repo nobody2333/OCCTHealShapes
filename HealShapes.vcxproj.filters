@@ -54,6 +54,9 @@
     <ClCompile Include="SewShells.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="HealClosedNarrowGap.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Viewer.h">
@@ -87,6 +90,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="SewShells.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="HealClosedNarrowGap.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

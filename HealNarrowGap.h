@@ -9,21 +9,43 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 
-// 专门处理“同端点双边细缝”的局部修复器。
+// 专门处理“同端点双边细缝”的局部细缝修复。
 class HealNarrowGap {
 public:
     // 修复参数：只约束本类负责的窄缝场景，不做全局 sewing 或补面。
     struct Params {
-        // 两条候选边采样点之间允许的最大 3D 间隙。
-        double maxGap = 1.0e-1;
+        // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
+        double candidateMaxGap = 1.0e-1;
+        // 真正允许执行拓扑替换的最大边间距离，用于二次严格过滤。
+        double repairMaxGap = 8.0e-2;
+        // pcurve 修复和合法性检查容差。
+        double pcurveTol = 1.0e-5;
+        // pcurve 容差上限，避免根据已有 edge tolerance 放大过度。
+        double maxPCurveTol = 1.0e-2;
+        // face 重建容差，用于新建 face 和局部 wire/face 修复。
+        double faceTol = 1.0e-5;
+        // face 容差上限。
+        double maxFaceTol = 1.0e-3;
+        // ShapeFix_Shape 的工作精度。
+        double shapeFixPrecision = 1.0e-6;
+        // ShapeFix_Shape 允许的最大容差。
+        double shapeFixMaxTolerance = 1.0e-3;
         // 端点几何距离兜底匹配容差；优先使用 TopoDS_Vertex::IsSame。
         double maxEndpointTolerance = 1.0e-7;
         // 候选边切向允许的最大夹角，方向相反也视为可接受。
         double maxTangentAngle = 20.0 * 3.14159265358979323846 / 180.0;
         // 两条边长度相似度下限：min(lengthA, lengthB) / max(lengthA, lengthB)。
         double minLengthRatio = 0.9;
-        // 沿 3D 曲线同步采样的点数。
+        // 固定采样点数；关闭自适应采样或自适应参数无效时作为兜底值。
         int sampleCount = 20;
+        // 是否启用按边长自适应采样；false 时使用固定 sampleCount。
+        bool useAdaptiveSampleCount = true;
+        // 自适应采样的最小采样点数，至少包含两个端点。
+        int minSampleCount = 8;
+        // 自适应采样的最大采样点数，防止长边导致投影计算过慢。
+        int maxSampleCount = 80;
+        // 目标采样间距，单位与模型单位一致。
+        double targetSampleSpacing = 1.0;
         // 为 true 时，在容差不明显更优的情况下优先保留较长边。
         bool preferLongerEdgeToKeep = true;
         // 为 true 时，单次局部替换校验通过后再运行 ShapeFix_Shape。
@@ -74,10 +96,12 @@ private:
         double lengthA = 0.0;
         // edgeB 的 3D 长度。
         double lengthB = 0.0;
-        // 两条 3D 曲线同步采样得到的平均间隙。
+        // 两条 3D 曲线双向最近距离采样得到的平均间隙。
         double meanGap = 0.0;
-        // 两条 3D 曲线同步采样得到的最大间隙。
+        // 两条 3D 曲线双向最近距离采样得到的最大间隙。
         double maxGap = 0.0;
+        // 本候选实际使用的采样点数，便于调试自适应采样。
+        int usedSampleCount = 0;
         // 最差采样点处的 abs(dot(tangentA, tangentB))。
         double tangentScore = 0.0;
         // 长度相似度，越接近 1 越好。
@@ -135,7 +159,10 @@ private:
     // 判断 edge 是否存在 3D curve。
     bool has3DCurve(const TopoDS_Edge& edge) const;
 
-    // 对候选边对做同步采样，计算 meanGap/maxGap/tangentScore。
+    // 根据候选边长度计算实际采样点数；关闭自适应或参数无效时返回固定 sampleCount。
+    int computeSampleCountForCandidate(const Candidate& candidate) const;
+
+    // 对候选边对做双向最近距离采样，计算 meanGap/maxGap/tangentScore。
     bool evaluateGeometricSimilarity(
         Candidate& candidate,
         std::string& errorMessage) const;
@@ -164,7 +191,7 @@ private:
         const TopoDS_Face& faceToRebuild,
         const TopoDS_Edge& edgeToReplace,
         const TopoDS_Edge& replacementEdgeUse,
-        double tol,
+        double faceTol,
         TopoDS_Face& rebuiltFace,
         std::string& errorMessage) const;
 
