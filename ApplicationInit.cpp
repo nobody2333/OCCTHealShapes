@@ -912,6 +912,10 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
                     logFile << "  (no messages)" << std::endl;
                 }
                 for (const std::string& message : messages) {
+                    if (message.empty()) {
+                        logFile << std::endl;
+                        continue;
+                    }
                     logFile << "  - " << message << std::endl;
                 }
                 logFile << std::endl;
@@ -1025,6 +1029,10 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
                     logFile << "  (no messages)" << std::endl;
                 }
                 for (const std::string& message : messages) {
+                    if (message.empty()) {
+                        logFile << std::endl;
+                        continue;
+                    }
                     logFile << "  - " << message << std::endl;
                 }
                 logFile << std::endl;
@@ -1140,6 +1148,10 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
                     logFile << "  (no messages)" << std::endl;
                 }
                 for (const std::string& message : messages) {
+                    if (message.empty()) {
+                        logFile << std::endl;
+                        continue;
+                    }
                     logFile << "  - " << message << std::endl;
                 }
                 logFile << std::endl;

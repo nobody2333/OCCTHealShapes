@@ -3,6 +3,7 @@
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
+#include <BRepLib_CheckCurveOnSurface.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -199,8 +200,7 @@ bool GeometryUtils::HasValidPCurveOnFace(const TopoDS_Edge& edge,
             return false;
         }
 
-        TopLoc_Location surfaceLocation;
-        Handle(Geom_Surface) surface = BRep_Tool::Surface(face, surfaceLocation);
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
         if (surface.IsNull()) {
             if (errorMessage != nullptr) {
                 *errorMessage = "face has no support surface";
@@ -224,37 +224,32 @@ bool GeometryUtils::HasValidPCurveOnFace(const TopoDS_Edge& edge,
             return false;
         }
 
-        constexpr int sampleCount = 5;
-        for (int sample = 0; sample < sampleCount; ++sample) {
-            const double t = static_cast<double>(sample) / static_cast<double>(sampleCount - 1);
-            const double param3d = first3d + (last3d - first3d) * t;
-            const double param2d = first2d + (last2d - first2d) * t;
-
-            gp_Pnt p3d = curve3d->Value(param3d);
-            p3d.Transform(curveLocation.Transformation());
-
-            const gp_Pnt2d uv = pcurve->Value(param2d);
-            gp_Pnt pSurf = surface->Value(uv.X(), uv.Y());
-            pSurf.Transform(surfaceLocation.Transformation());
-
-            const double distance = p3d.Distance(pSurf);
-            if (distance > safeTolerance) {
-                if (errorMessage != nullptr) {
-                    std::ostringstream os;
-                    os << "pcurve projection mismatch: distance=" << distance
-                       << ", tolerance=" << safeTolerance
-                       << ", sample=" << sample;
-                    *errorMessage = os.str();
-                }
-                return false;
+        if (!BRep_Tool::SameParameter(edge) || !BRep_Tool::SameRange(edge)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "invalid same-parameter state";
             }
+            return false;
+        }
+
+        BRepLib_CheckCurveOnSurface checker(edge, face);
+        checker.Perform();
+        if (!checker.IsDone()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "pcurve validation failed";
+            }
+            return false;
+        }
+
+        if (checker.MaxDistance() > safeTolerance) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "pcurve projection mismatch";
+            }
+            return false;
         }
     }
-    catch (Standard_Failure& failure) {
+    catch (Standard_Failure&) {
         if (errorMessage != nullptr) {
-            const Standard_CString message = failure.GetMessageString();
-            *errorMessage = "OCCT failure while validating pcurve: ";
-            *errorMessage += message != nullptr ? message : "OCCT failure";
+            *errorMessage = "OCCT failure while validating pcurve";
         }
         return false;
     }

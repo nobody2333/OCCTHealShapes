@@ -12,16 +12,32 @@
 // 专门处理“同端点双边细缝”的局部细缝修复。
 class HealNarrowGap {
 public:
+    // 修复策略：一侧替换适合极窄细缝；中线塌缩用于直接替换 pcurve 不可靠的候选。
+    enum class RepairStrategy {
+        ReplaceOneSide,
+        SurfaceIntersection,
+        MidlineCollapse,
+        Auto
+    };
+
     // 修复参数：只约束本类负责的窄缝场景，不做全局 sewing 或补面。
     struct Params {
+        // Auto 会先尝试一侧替换；当 gap 较大或 pcurve 相关失败时，再尝试中线塌缩。
+        RepairStrategy repairStrategy = RepairStrategy::Auto;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
         double candidateMaxGap = 1.0e-1;
         // 真正允许执行拓扑替换的最大边间距离，用于二次严格过滤。
         double repairMaxGap = 8.0e-2;
-        // pcurve 修复和合法性检查容差。
+        // surface intersection 允许处理的最大边间距离；只控制是否尝试求交线策略。
+        double surfaceIntersectionMaxGap = 1.0e-1;
+        // surface intersection 求交阶段的附加干涉判定容差；不参与替换后 pcurve 校验。
+        double surfaceIntersectionFuzzyTol = 1.0e-1;
+        // 中线塌缩允许处理的最大边间距离；不参与 pcurve/face/ShapeFix 容差计算。
+        double midlineMaxGap = 1.0e-1;
+        // 保留的 pcurve 配置容差；当前新共享 edge 继承两条原 edge 的最大 tolerance。
         double pcurveTol = 1.0e-5;
-        // pcurve 容差上限，避免根据已有 edge tolerance 放大过度。
-        double maxPCurveTol = 1.0e-2;
+        // 保留的 pcurve 容差上限；当前不截断从原候选 edge 继承的 tolerance。
+        double maxPCurveTol = 1.0e-3;
         // face 重建容差，用于新建 face 和局部 wire/face 修复。
         double faceTol = 1.0e-5;
         // face 容差上限。
@@ -179,6 +195,40 @@ private:
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
+    // 原有策略：保留一侧 edge，并用它替换另一侧 edge。
+    bool tryRepairByReplacingOneSide(
+        const TopoDS_Shape& currentShape,
+        const Candidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
+    // 求交线策略：用两个 face 的真实 surface-section edge 替换两侧 gap edge。
+    bool tryRepairBySurfaceIntersection(
+        const TopoDS_Shape& currentShape,
+        const Candidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
+    // 从 faceA/faceB 的 section 结果中选择最贴近当前 gap 的交线 edge。
+    bool buildSurfaceIntersectionEdgeForCandidate(
+        const Candidate& candidate,
+        double endpointDistanceTolerance,
+        TopoDS_Edge& intersectionEdge,
+        std::string& errorMessage) const;
+
+    // 中线策略：由两侧 edge 采样生成中线 edge，并让两个 face 都引用这条新 edge。
+    bool tryRepairByMidlineCollapse(
+        const TopoDS_Shape& currentShape,
+        const Candidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
+    // 根据候选两侧 edge 的采样中点构造一条 3D 中线 edge。
+    bool buildMidlineEdgeForCandidate(
+        const Candidate& candidate,
+        TopoDS_Edge& midlineEdge,
+        std::string& errorMessage) const;
+
     // 在 oldFace 的 wire 中查找 oldEdge 的实际 edge use。
     bool findEdgeUseInFaceWire(
         const TopoDS_Face& oldFace,
@@ -215,6 +265,7 @@ private:
         const TopoDS_Shape& repairedShape,
         const TopoDS_Edge& keptEdge,
         int freeEdgesBefore,
+        double pcurveValidationTol,
         std::string& errorMessage) const;
 
     // 追加修复日志。

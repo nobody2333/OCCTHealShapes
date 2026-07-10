@@ -9,10 +9,12 @@
 #include <vector>
 
 #include <BRep_Builder.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepCheck_Face.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_ListOfStatus.hxx>
@@ -24,8 +26,14 @@
 #include <Extrema_ExtPC.hxx>
 #include <Extrema_POnCurv.hxx>
 #include <Geom2d_Curve.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_Geometry.hxx>
 #include <Geom_Surface.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 #include <Precision.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Face.hxx>
@@ -40,6 +48,7 @@
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 
 namespace {
 constexpr int kMaxAutomaticRepairIterations = 1000;
@@ -65,11 +74,166 @@ double Clamp01(double value)
     return std::max(0.0, std::min(1.0, value));
 }
 
+const char* repairStrategyName(HealNarrowGap::RepairStrategy strategy)
+{
+    switch (strategy) {
+    case HealNarrowGap::RepairStrategy::ReplaceOneSide:
+        return "ReplaceOneSide";
+    case HealNarrowGap::RepairStrategy::SurfaceIntersection:
+        return "SurfaceIntersection";
+    case HealNarrowGap::RepairStrategy::MidlineCollapse:
+        return "MidlineCollapse";
+    case HealNarrowGap::RepairStrategy::Auto:
+        return "Auto";
+    default:
+        return "Unknown";
+    }
+}
+
+Handle(Geom_Curve) curveForEdgeInWorld(const TopoDS_Edge& edge, double& first, double& last)
+{
+    first = 0.0;
+    last = 0.0;
+    if (edge.IsNull()) {
+        return Handle(Geom_Curve)();
+    }
+
+    TopLoc_Location location;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+    if (curve.IsNull()) {
+        return curve;
+    }
+
+    if (!location.IsIdentity()) {
+        Handle(Geom_Geometry) transformed = curve->Transformed(location.Transformation());
+        curve = Handle(Geom_Curve)::DownCast(transformed);
+    }
+
+    return curve;
+}
+
+bool projectPointOnCurve(
+    const gp_Pnt& point,
+    const Handle(Geom_Curve)& curve,
+    double first,
+    double last,
+    double& parameter,
+    double& distance)
+{
+    parameter = first;
+    distance = std::numeric_limits<double>::max();
+    if (curve.IsNull() || !std::isfinite(first) || !std::isfinite(last) ||
+        std::abs(last - first) <= Precision::PConfusion()) {
+        return false;
+    }
+
+    GeomAPI_ProjectPointOnCurve projector(point, curve, first, last);
+    if (projector.NbPoints() <= 0) {
+        return false;
+    }
+
+    parameter = projector.LowerDistanceParameter();
+    distance = projector.LowerDistance();
+    return std::isfinite(parameter) && std::isfinite(distance);
+}
+
+bool nearestDistanceToEdge(
+    const gp_Pnt& point,
+    BRepAdaptor_Curve& targetCurve,
+    double& nearestDistance)
+{
+    nearestDistance = std::numeric_limits<double>::max();
+
+    Extrema_ExtPC extrema(
+        point,
+        targetCurve,
+        targetCurve.FirstParameter(),
+        targetCurve.LastParameter(),
+        Precision::PConfusion());
+
+    if (extrema.IsDone()) {
+        for (int extIndex = 1; extIndex <= extrema.NbExt(); ++extIndex) {
+            const double squareDistance = extrema.SquareDistance(extIndex);
+            if (squareDistance < nearestDistance * nearestDistance) {
+                nearestDistance = std::sqrt(std::max(0.0, squareDistance));
+            }
+        }
+
+        Standard_Real firstSquareDistance = 0.0;
+        Standard_Real lastSquareDistance = 0.0;
+        gp_Pnt firstPoint;
+        gp_Pnt lastPoint;
+        extrema.TrimmedSquareDistances(firstSquareDistance, lastSquareDistance, firstPoint, lastPoint);
+        nearestDistance = std::min(nearestDistance, std::sqrt(std::max(0.0, firstSquareDistance)));
+        nearestDistance = std::min(nearestDistance, std::sqrt(std::max(0.0, lastSquareDistance)));
+    }
+
+    if (!std::isfinite(nearestDistance) || nearestDistance == std::numeric_limits<double>::max()) {
+        constexpr int fallbackSamples = 32;
+        for (int sample = 0; sample < fallbackSamples; ++sample) {
+            const double t = static_cast<double>(sample) / static_cast<double>(fallbackSamples - 1);
+            const double param = targetCurve.FirstParameter()
+                + (targetCurve.LastParameter() - targetCurve.FirstParameter()) * t;
+            const double distance = point.Distance(targetCurve.Value(param));
+            nearestDistance = std::min(nearestDistance, distance);
+        }
+    }
+
+    return std::isfinite(nearestDistance) && nearestDistance < std::numeric_limits<double>::max();
+}
+
 // 将 OCCT 异常消息转为 std::string，便于写入修复日志。
 std::string failureText(const Standard_Failure& failure)
 {
     const Standard_CString message = failure.GetMessageString();
     return message != nullptr ? std::string(message) : std::string("OCCT failure");
+}
+
+std::string replaceAll(std::string text, const std::string& from, const std::string& to)
+{
+    if (from.empty()) {
+        return text;
+    }
+
+    std::string::size_type pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.length(), to);
+        pos += to.length();
+    }
+    return text;
+}
+
+std::string makeFailureReasonReadable(const std::string& reason)
+{
+    if (reason.empty()) {
+        return "no detail";
+    }
+
+    std::string readable = replaceAll(reason, "; ", "\n");
+    readable = replaceAll(readable, ": ", ":\n  ");
+    return readable;
+}
+
+std::string indentMultiline(const std::string& text, const std::string& indent)
+{
+    std::ostringstream os;
+    bool atLineStart = true;
+    for (char ch : text) {
+        if (atLineStart) {
+            os << indent;
+        }
+        os << ch;
+        atLineStart = ch == '\n';
+    }
+    return os.str();
+}
+
+std::string strategyFailureBlock(const char* strategyName, const std::string& reason)
+{
+    std::ostringstream os;
+    os << "[" << strategyName << "]" << "\n"
+       << indentMultiline(makeFailureReasonReadable(reason), "  ");
+    return os.str();
 }
 
 const char* BRepCheckStatusName(BRepCheck_Status status)
@@ -312,6 +476,26 @@ HealNarrowGap::HealNarrowGap(const Params& params)
     else {
         myParams.repairMaxGap = std::max(myParams.repairMaxGap, Precision::Confusion());
     }
+    if (myParams.surfaceIntersectionMaxGap <= 0.0) {
+        myParams.surfaceIntersectionMaxGap = myParams.candidateMaxGap;
+    }
+    else {
+        myParams.surfaceIntersectionMaxGap =
+            std::max(myParams.surfaceIntersectionMaxGap, Precision::Confusion());
+    }
+    if (myParams.surfaceIntersectionFuzzyTol < 0.0) {
+        myParams.surfaceIntersectionFuzzyTol = 0.0;
+    }
+    else if (myParams.surfaceIntersectionFuzzyTol > 0.0) {
+        myParams.surfaceIntersectionFuzzyTol =
+            std::max(myParams.surfaceIntersectionFuzzyTol, Precision::Confusion());
+    }
+    if (myParams.midlineMaxGap <= 0.0) {
+        myParams.midlineMaxGap = myParams.candidateMaxGap;
+    }
+    else {
+        myParams.midlineMaxGap = std::max(myParams.midlineMaxGap, Precision::Confusion());
+    }
 
     myParams.pcurveTol = std::max(myParams.pcurveTol, Precision::Confusion());
     myParams.maxPCurveTol = std::max(myParams.maxPCurveTol, myParams.pcurveTol);
@@ -359,23 +543,31 @@ int HealNarrowGap::perform()
         appendMessage(messages_, os.str());
     }
 
+    std::string originalCheckError;
+    const std::vector<BRepCheckFailureInfo> originalFailures =
+        collectBRepCheckFailures(currentShape, &originalCheckError);
+    if (!originalCheckError.empty()) {
+        appendMessage(messages_, "Original shape BRepCheck failed: " + originalCheckError);
+    }
+    else if (!originalFailures.empty()) {
+        std::ostringstream os;
+        os << "Original shape has existing BRepCheck failures:"
+           << describeBRepCheckFailureList(originalFailures);
+        appendMessage(messages_, os.str());
+    }
+    else {
+        appendMessage(messages_, "Original shape has no BRepCheck failures");
+    }
+
     for (int iter = 0; iter < iterationLimit; ++iter) {
+
+        if (iter > 0) {
+            appendMessage(messages_, "");
+        }
+		appendMessage(messages_, "=== Iteration " + std::to_string(iter + 1) + " ===");
         // edgeFaceMap 记录每条 edge 的相邻 face，用于判定单面边和 free edge。
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
-
-        std::string existingCheckError;
-        const std::vector<BRepCheckFailureInfo> existingFailures =
-            collectBRepCheckFailures(currentShape, &existingCheckError);
-        if (!existingCheckError.empty()) {
-            appendMessage(messages_, "Current shape BRepCheck failed: " + existingCheckError);
-        }
-        else if (!existingFailures.empty()) {
-            std::ostringstream os;
-            os << "Current shape has existing BRepCheck failures:"
-               << describeBRepCheckFailureList(existingFailures);
-            appendMessage(messages_, os.str());
-        }
 
         // candidates 是本轮从当前形状重新提取的候选，避免基于过期拓扑批量修改。
         std::vector<Candidate> candidates = extractCandidatePairs(currentShape, edgeFaceMap, messages_);
@@ -388,7 +580,7 @@ int HealNarrowGap::perform()
 
         {
             std::ostringstream os;
-            os << "Iteration " << (iter + 1) << ": candidate count = " << candidates.size();
+            os << "Candidate count = " << candidates.size();
             appendMessage(messages_, os.str());
         }
 
@@ -405,12 +597,14 @@ int HealNarrowGap::perform()
             std::string errorMessage;
             if (!tryRepairCandidate(currentShape, candidate, repairedShape, errorMessage)) {
                 std::ostringstream failStream;
-                failStream << "Candidate failed: maxGap=" << candidate.maxGap
-                           << ", meanGap=" << candidate.meanGap
-                           << ", lengthRatio=" << candidate.lengthRatio
-                           << ", tangentScore=" << candidate.tangentScore
-                           << ", sampleCount=" << candidate.usedSampleCount
-                           << ", reason=" << errorMessage;
+                failStream << "Candidate failed:"
+                           << "\n  maxGap=" << candidate.maxGap
+                           << "\n  meanGap=" << candidate.meanGap
+                           << "\n  lengthRatio=" << candidate.lengthRatio
+                           << "\n  tangentScore=" << candidate.tangentScore
+                           << "\n  sampleCount=" << candidate.usedSampleCount
+                           << "\n  reason:"
+                           << "\n" << indentMultiline(makeFailureReasonReadable(errorMessage), "    ");
                 appendMessage(messages_, failStream.str());
                 continue;
             }
@@ -428,8 +622,12 @@ int HealNarrowGap::perform()
                << ", lengthRatio=" << candidate.lengthRatio
                << ", tangentScore=" << candidate.tangentScore
                << ", sampleCount=" << candidate.usedSampleCount
+               << ", repairStrategy=" << repairStrategyName(myParams.repairStrategy)
                << ", candidateMaxGap=" << myParams.candidateMaxGap
                << ", repairMaxGap=" << myParams.repairMaxGap
+               << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+               << ", surfaceIntersectionFuzzyTol=" << myParams.surfaceIntersectionFuzzyTol
+               << ", midlineMaxGap=" << myParams.midlineMaxGap
                << ", shapeFixPrecision=" << myParams.shapeFixPrecision
                << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
             appendMessage(messages_, os.str());
@@ -447,6 +645,27 @@ int HealNarrowGap::perform()
     }
 
     resultShape_ = currentShape;
+    {
+        std::string finalCheckError;
+        const std::vector<BRepCheckFailureInfo> existingFailures =
+            collectBRepCheckFailures(resultShape_, &finalCheckError);
+        if (!finalCheckError.empty()) {
+            appendMessage(messages_, "");
+            appendMessage(messages_, "Result shape BRepCheck failed: " + finalCheckError);
+        }
+        else if (!existingFailures.empty()) {
+            appendMessage(messages_, "");
+            std::ostringstream os;
+            os << "Result shape has existing BRepCheck failures:"
+               << describeBRepCheckFailureList(existingFailures);
+            appendMessage(messages_, os.str());
+        }
+        else {
+            appendMessage(messages_, "");
+            appendMessage(messages_, "Result shape has no BRepCheck failures");
+        }
+    }
+
     return repairedCount_;
 }
 
@@ -975,8 +1194,133 @@ HealNarrowGap::EdgeChoice HealNarrowGap::chooseEdgeToKeep(const Candidate& candi
     return choice;
 }
 
-// 尝试提交单个候选修复；任何校验失败都会返回 false，由调用方回滚并尝试下一候选。
+// 根据策略尝试提交单个候选修复；不改变主循环“每轮只提交一个候选”的行为。
 bool HealNarrowGap::tryRepairCandidate(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    if (currentShape.IsNull()) {
+        errorMessage = "Current shape is null";
+        return false;
+    }
+
+    const bool sideGapAllowed = candidate.maxGap <= myParams.repairMaxGap;
+    const bool surfaceIntersectionGapAllowed =
+        candidate.maxGap <= myParams.surfaceIntersectionMaxGap;
+    const bool midlineGapAllowed = candidate.maxGap <= myParams.midlineMaxGap;
+
+    if (myParams.repairStrategy == RepairStrategy::ReplaceOneSide) {
+        return tryRepairByReplacingOneSide(currentShape, candidate, repairedShape, errorMessage);
+    }
+
+    if (myParams.repairStrategy == RepairStrategy::SurfaceIntersection) {
+        if (!surfaceIntersectionGapAllowed) {
+            std::ostringstream os;
+            os << "surface intersection gap too large: maxGap=" << candidate.maxGap
+               << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+               << ", candidateMaxGap=" << myParams.candidateMaxGap;
+            errorMessage = os.str();
+            return false;
+        }
+
+        return tryRepairBySurfaceIntersection(currentShape, candidate, repairedShape, errorMessage);
+    }
+
+    if (myParams.repairStrategy == RepairStrategy::MidlineCollapse) {
+        if (!midlineGapAllowed) {
+            std::ostringstream os;
+            os << "midline gap too large: maxGap=" << candidate.maxGap
+               << ", midlineMaxGap=" << myParams.midlineMaxGap
+               << ", candidateMaxGap=" << myParams.candidateMaxGap;
+            errorMessage = os.str();
+            return false;
+        }
+
+        return tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, errorMessage);
+    }
+
+    std::string sideError;
+    if (sideGapAllowed) {
+        if (tryRepairByReplacingOneSide(currentShape, candidate, repairedShape, sideError)) {
+            return true;
+        }
+    }
+    else {
+        std::ostringstream os;
+        os << "repair gap too large for one-side replacement: maxGap=" << candidate.maxGap
+           << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        sideError = os.str();
+    }
+
+    // Auto: 先做一侧替换；失败后优先尝试 face-face 交线，再用空间中线兜底。
+    std::string surfaceIntersectionError;
+    if (surfaceIntersectionGapAllowed) {
+        if (tryRepairBySurfaceIntersection(
+                currentShape,
+                candidate,
+                repairedShape,
+                surfaceIntersectionError)) {
+            if (!sideError.empty()) {
+                std::ostringstream os;
+                os << "Warning: repaired by surface intersection after earlier strategy failed:"
+                   << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ");
+                appendMessage(messages_, os.str());
+            }
+            return true;
+        }
+    }
+    else {
+        std::ostringstream os;
+        os << "surface intersection gap too large: maxGap=" << candidate.maxGap
+           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+           << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        surfaceIntersectionError = os.str();
+    }
+
+    if (!midlineGapAllowed) {
+        std::ostringstream os;
+        std::ostringstream midlineGapError;
+        midlineGapError << "midline gap too large: maxGap=" << candidate.maxGap
+                        << ", midlineMaxGap=" << myParams.midlineMaxGap;
+        os << "Auto repair failed:"
+           << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ")
+           << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
+           << "\n" << indentMultiline(strategyFailureBlock("MidlineCollapse", midlineGapError.str()), "  ");
+        errorMessage = os.str();
+        return false;
+    }
+
+    std::string midlineError;
+    if (tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, midlineError)) {
+        if (!sideError.empty()) {
+            std::ostringstream os;
+            os << "Warning: repaired by midline collapse after earlier strategies failed:"
+               << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ")
+               << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ");
+            appendMessage(messages_, os.str());
+        }
+        return true;
+    }
+
+    {
+        std::ostringstream os;
+        os << "Auto repair failed:";
+        if (!sideError.empty()) {
+            os << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ");
+        }
+        os << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
+           << "\n" << indentMultiline(strategyFailureBlock("MidlineCollapse", midlineError), "  ");
+        errorMessage = os.str();
+    }
+    return false;
+}
+
+// 尝试提交单个候选修复；任何校验失败都会返回 false，由调用方回滚并尝试下一候选。
+bool HealNarrowGap::tryRepairByReplacingOneSide(
     const TopoDS_Shape& currentShape,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
@@ -1008,15 +1352,13 @@ bool HealNarrowGap::tryRepairCandidate(
         return false;
     }
 
-    // pcurveTol 只用于 pcurve 修复/检查，不随候选细缝宽度放大。
-    const double existingEdgeTol = std::max({
+    // 新共享 edge 的 pcurve 校验继承两条原候选 edge 中较大的 tolerance。
+    // 该容差不参与候选 gap 判断、section 求交或 face/ShapeFix 容差计算。
+    const double pcurveTol = std::max({
         Precision::Confusion(),
         BRep_Tool::Tolerance(choice.keptEdge),
         BRep_Tool::Tolerance(choice.edgeToReplace)
         });
-    const double pcurveTol = std::min(
-        std::max(existingEdgeTol * 5.0, myParams.pcurveTol),
-        myParams.maxPCurveTol);
 
     // faceTol 只用于重建 face 和局部 wire/face 修复，不使用 edge-edge gap。
     const double existingFaceTol = std::max(
@@ -1045,13 +1387,19 @@ bool HealNarrowGap::tryRepairCandidate(
     }
 
     if (!ensurePCurveOnFace(keptEdgeInFixedWire, choice.fixedFace, pcurveTol, errorMessage)) {
-        errorMessage = "Failed to add pcurve on fixed face: " + errorMessage;
+        errorMessage = "Precheck failed: kept edge has invalid pcurve on fixed face: " + errorMessage;
         return false;
     }
 
-    if (!ensurePCurveOnFace(edgeToReplaceInWire, choice.faceToRebuild, pcurveTol, errorMessage)) {
-        errorMessage = "Failed to add pcurve on rebuilt face: " + errorMessage;
-        return false;
+    std::string edgeToReplacePCurveError;
+    if (!ensurePCurveOnFace(edgeToReplaceInWire, choice.faceToRebuild, pcurveTol, edgeToReplacePCurveError)) {
+        // edgeToReplace 后续会从 faceToRebuild 的 wire 中移除。
+        // 因此旧 edge use 的 pcurve 失败只记录为 warning，不阻止后续用 keptEdge 重建目标 face。
+        std::ostringstream warning;
+        warning << "Warning: precheck found invalid pcurve on edge to be replaced; "
+                << "continue one-side replacement:"
+                << "\n" << indentMultiline(makeFailureReasonReadable(edgeToReplacePCurveError), "  ");
+        appendMessage(messages_, warning.str());
     }
 
     TopoDS_Face rebuiltFace;
@@ -1159,18 +1507,796 @@ bool HealNarrowGap::tryRepairCandidate(
 
     }
 
-    if (!validateEdgeReplacement(currentShape, trialShape, choice.keptEdge, freeEdgesBefore, errorMessage)) {
+    if (!validateEdgeReplacement(
+            currentShape,
+            trialShape,
+            choice.keptEdge,
+            freeEdgesBefore,
+            pcurveTol,
+            errorMessage)) {
         return false;
     }
 
     {
         std::ostringstream os;
-        os << "Candidate repair accepted: candidateMaxGap=" << myParams.candidateMaxGap
+        os << "Candidate repair accepted by one-side replacement: repairStrategy="
+           << repairStrategyName(myParams.repairStrategy)
+           << ", candidateMaxGap=" << myParams.candidateMaxGap
            << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+           << ", surfaceIntersectionFuzzyTol=" << myParams.surfaceIntersectionFuzzyTol
+           << ", midlineMaxGap=" << myParams.midlineMaxGap
            << ", candidate.maxGap=" << candidate.maxGap
            << ", candidate.meanGap=" << candidate.meanGap
            << ", sampleCount=" << candidate.usedSampleCount
-           << ", pcurveTol=" << pcurveTol
+           << ", inheritedPCurveTol=" << pcurveTol
+           << ", faceTol=" << faceTol
+           << ", shapeFixPrecision=" << myParams.shapeFixPrecision
+           << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
+        appendMessage(messages_, os.str());
+    }
+
+    repairedShape = trialShape;
+    return true;
+}
+
+bool HealNarrowGap::buildSurfaceIntersectionEdgeForCandidate(
+    const Candidate& candidate,
+    double endpointDistanceTolerance,
+    TopoDS_Edge& intersectionEdge,
+    std::string& errorMessage) const
+{
+    intersectionEdge.Nullify();
+    if (candidate.faceA.IsNull() || candidate.faceB.IsNull() ||
+        candidate.edgeA.IsNull() || candidate.edgeB.IsNull()) {
+        errorMessage = "invalid candidate for surface intersection";
+        return false;
+    }
+
+    try {
+        TopoDS_Vertex aStart;
+        TopoDS_Vertex aEnd;
+        TopoDS_Vertex bStart;
+        TopoDS_Vertex bEnd;
+        if (!getEdgeVerticesOriented(candidate.edgeA, aStart, aEnd) ||
+            !getEdgeVerticesOriented(candidate.edgeB, bStart, bEnd)) {
+            errorMessage = "failed to get oriented edge vertices for surface intersection";
+            return false;
+        }
+
+        if (!((aStart.IsSame(bStart) && aEnd.IsSame(bEnd)) ||
+              (aStart.IsSame(bEnd) && aEnd.IsSame(bStart)))) {
+            errorMessage = "candidate edges do not share endpoints for surface intersection";
+            return false;
+        }
+
+        BRepAlgoAPI_Section section(candidate.faceA, candidate.faceB, Standard_False);
+        if (myParams.surfaceIntersectionFuzzyTol > 0.0) {
+            section.SetFuzzyValue(myParams.surfaceIntersectionFuzzyTol);
+        }
+        section.Approximation(Standard_True);
+        section.ComputePCurveOn1(Standard_True);
+        section.ComputePCurveOn2(Standard_True);
+        section.Build();
+        if (!section.IsDone() || section.HasErrors()) {
+            errorMessage = "BRepAlgoAPI_Section failed";
+            return false;
+        }
+
+        const TopoDS_Shape sectionShape = section.Shape();
+        if (sectionShape.IsNull()) {
+            errorMessage = "surface intersection returned null shape";
+            return false;
+        }
+
+        BRepAdaptor_Curve edgeCurveA(candidate.edgeA);
+        BRepAdaptor_Curve edgeCurveB(candidate.edgeB);
+        const gp_Pnt startPoint = BRep_Tool::Pnt(aStart);
+        const gp_Pnt endPoint = BRep_Tool::Pnt(aEnd);
+        const double endpointTol = std::max({
+            Precision::Confusion(),
+            endpointDistanceTolerance,
+            BRep_Tool::Tolerance(aStart),
+            BRep_Tool::Tolerance(aEnd)
+            });
+        const int sampleCount = std::max(8, std::min(32, computeSampleCountForCandidate(candidate)));
+
+        bool found = false;
+        double bestScore = std::numeric_limits<double>::max();
+        TopoDS_Edge bestEdge;
+        int sectionEdgeCount = 0;
+        int rejectedByEndpointDistance = 0;
+        int rejectedByGapDistance = 0;
+        int rejectedByMakeEdge = 0;
+        double bestRejectedStartDistance = std::numeric_limits<double>::max();
+        double bestRejectedEndDistance = std::numeric_limits<double>::max();
+        double bestRejectedEndpointDistance = std::numeric_limits<double>::max();
+        double bestRejectedGapDistance = std::numeric_limits<double>::max();
+
+        for (TopExp_Explorer edgeExp(sectionShape, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
+            const TopoDS_Edge sectionEdge = TopoDS::Edge(edgeExp.Current());
+            if (sectionEdge.IsNull() || isDegeneratedEdge(sectionEdge) || !has3DCurve(sectionEdge)) {
+                continue;
+            }
+
+            double first = 0.0;
+            double last = 0.0;
+            Handle(Geom_Curve) curve = curveForEdgeInWorld(sectionEdge, first, last);
+            if (curve.IsNull()) {
+                continue;
+            }
+            ++sectionEdgeCount;
+
+            double startParam = first;
+            double endParam = last;
+            double startDistance = 0.0;
+            double endDistance = 0.0;
+            if (!projectPointOnCurve(startPoint, curve, first, last, startParam, startDistance) ||
+                !projectPointOnCurve(endPoint, curve, first, last, endParam, endDistance)) {
+                continue;
+            }
+
+            if (std::abs(endParam - startParam) <= Precision::PConfusion()) {
+                continue;
+            }
+
+            // 构造 edge 前先校验原端点是否真正落在 section curve 上。
+            // 否则 MakeEdge 可能成功，但后续 pcurve 校验会在端点或近端采样处失败。
+            const double endpointDistance = std::max(startDistance, endDistance);
+            if (endpointDistance > endpointTol) {
+                ++rejectedByEndpointDistance;
+                if (endpointDistance < bestRejectedEndpointDistance) {
+                    bestRejectedEndpointDistance = endpointDistance;
+                    bestRejectedStartDistance = startDistance;
+                    bestRejectedEndDistance = endDistance;
+                }
+                continue;
+            }
+
+            double maxDistanceToGapEdges = 0.0;
+            double meanDistanceToGapEdges = 0.0;
+            bool distanceFailed = false;
+            for (int sample = 0; sample < sampleCount; ++sample) {
+                const double t = static_cast<double>(sample) / static_cast<double>(sampleCount - 1);
+                const double param = startParam + (endParam - startParam) * t;
+                const gp_Pnt point = curve->Value(param);
+
+                double distanceToA = 0.0;
+                double distanceToB = 0.0;
+                if (!nearestDistanceToEdge(point, edgeCurveA, distanceToA) ||
+                    !nearestDistanceToEdge(point, edgeCurveB, distanceToB)) {
+                    distanceFailed = true;
+                    break;
+                }
+
+                const double distanceToGap = std::min(distanceToA, distanceToB);
+                maxDistanceToGapEdges = std::max(maxDistanceToGapEdges, distanceToGap);
+                meanDistanceToGapEdges += distanceToGap;
+            }
+
+            if (distanceFailed) {
+                continue;
+            }
+            meanDistanceToGapEdges /= static_cast<double>(sampleCount);
+
+            // section edge 必须靠近原 gap 区域；否则复杂 face-face 相交时可能选到其他交线。
+            if (maxDistanceToGapEdges > myParams.surfaceIntersectionMaxGap) {
+                ++rejectedByGapDistance;
+                bestRejectedGapDistance = std::min(bestRejectedGapDistance, maxDistanceToGapEdges);
+                continue;
+            }
+
+            Handle(Geom_Curve) edgeCurve = curve;
+            double edgeStartParam = startParam;
+            double edgeEndParam = endParam;
+            if (edgeEndParam < edgeStartParam) {
+                // 保证新 edge 的底层曲线方向和候选起点/终点一致，后续 face use 再沿用原 wire 方向。
+                edgeCurve = curve->Reversed();
+                edgeStartParam = curve->ReversedParameter(startParam);
+                edgeEndParam = curve->ReversedParameter(endParam);
+            }
+
+            BRepBuilderAPI_MakeEdge edgeMaker(edgeCurve, aStart, aEnd, edgeStartParam, edgeEndParam);
+            if (!edgeMaker.IsDone()) {
+                // 如果原顶点不在交线上，说明交线不能在不重建相邻边的情况下直接用于当前 wire。
+                ++rejectedByMakeEdge;
+                continue;
+            }
+
+            const double endpointScore = std::max(startDistance, endDistance);
+            const double score =
+                endpointScore * 4.0 +
+                meanDistanceToGapEdges +
+                maxDistanceToGapEdges * 0.25;
+            if (score < bestScore) {
+                bestScore = score;
+                bestEdge = edgeMaker.Edge();
+                found = true;
+            }
+        }
+
+        if (!found || bestEdge.IsNull()) {
+            std::ostringstream os;
+            os << "no usable surface intersection edge close to candidate gap"
+               << ": sectionEdges=" << sectionEdgeCount
+               << ", endpointDistanceTolerance=" << endpointTol
+               << ", rejectedByEndpointDistance=" << rejectedByEndpointDistance
+               << ", rejectedByGapDistance=" << rejectedByGapDistance
+               << ", rejectedByMakeEdge=" << rejectedByMakeEdge;
+            if (bestRejectedEndpointDistance < std::numeric_limits<double>::max()) {
+                os << ", bestRejectedStartDistance=" << bestRejectedStartDistance
+                   << ", bestRejectedEndDistance=" << bestRejectedEndDistance;
+            }
+            if (bestRejectedGapDistance < std::numeric_limits<double>::max()) {
+                os << ", bestRejectedGapDistance=" << bestRejectedGapDistance;
+            }
+            errorMessage = os.str();
+            return false;
+        }
+
+        intersectionEdge = bestEdge;
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "surface intersection edge construction failed: " + failureText(failure);
+        return false;
+    }
+
+    return true;
+}
+
+bool HealNarrowGap::tryRepairBySurfaceIntersection(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    if (currentShape.IsNull()) {
+        errorMessage = "Current shape is null";
+        return false;
+    }
+    if (candidate.faceA.IsNull() || candidate.faceB.IsNull() ||
+        candidate.edgeA.IsNull() || candidate.edgeB.IsNull()) {
+        errorMessage = "Invalid candidate for surface intersection";
+        return false;
+    }
+    if (candidate.faceA.IsSame(candidate.faceB)) {
+        errorMessage = "surface intersection does not support two edges on the same face";
+        return false;
+    }
+    if (candidate.maxGap > myParams.surfaceIntersectionMaxGap) {
+        std::ostringstream os;
+        os << "surface intersection gap too large: maxGap=" << candidate.maxGap
+           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+           << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        errorMessage = os.str();
+        return false;
+    }
+
+    const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
+    // SurfaceIntersection 产生的新 edge 在替换后使用原两条 edge 的最大 tolerance 校验 pcurve。
+    const double pcurveTol = std::max({
+        Precision::Confusion(),
+        BRep_Tool::Tolerance(candidate.edgeA),
+        BRep_Tool::Tolerance(candidate.edgeB)
+        });
+
+    const double existingFaceTol = std::max({
+        Precision::Confusion(),
+        BRep_Tool::Tolerance(candidate.faceA),
+        BRep_Tool::Tolerance(candidate.faceB)
+        });
+    const double faceTol = std::min(
+        std::max(existingFaceTol, myParams.faceTol),
+        myParams.maxFaceTol);
+
+    TopoDS_Edge intersectionEdge;
+    if (!buildSurfaceIntersectionEdgeForCandidate(
+            candidate,
+            myParams.maxEndpointTolerance,
+            intersectionEdge,
+            errorMessage)) {
+        return false;
+    }
+
+    TopoDS_Edge edgeAInWire;
+    if (!findEdgeUseInFaceWire(candidate.faceA, candidate.edgeA, edgeAInWire, errorMessage)) {
+        errorMessage = "edgeA not found in faceA wire for surface intersection: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Edge edgeBInWire;
+    if (!findEdgeUseInFaceWire(candidate.faceB, candidate.edgeB, edgeBInWire, errorMessage)) {
+        errorMessage = "edgeB not found in faceB wire for surface intersection: " + errorMessage;
+        return false;
+    }
+
+    // 新 edge 的使用方向跟随被替换 edge 在各自 wire 中的方向，保持 face 内侧判断依赖的 wire 方向关系。
+    TopoDS_Edge intersectionUseA = intersectionEdge;
+    intersectionUseA.Orientation(edgeAInWire.Orientation());
+    TopoDS_Edge intersectionUseB = intersectionEdge;
+    intersectionUseB.Orientation(edgeBInWire.Orientation());
+
+    if (!ensurePCurveOnFace(intersectionUseA, candidate.faceA, pcurveTol, errorMessage)) {
+        errorMessage = "Failed to add surface intersection pcurve on faceA: " + errorMessage;
+        return false;
+    }
+    if (!ensurePCurveOnFace(intersectionUseB, candidate.faceB, pcurveTol, errorMessage)) {
+        errorMessage = "Failed to add surface intersection pcurve on faceB: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Face rebuiltFaceA;
+    if (!rebuildFaceByReplacingEdge(
+            candidate.faceA,
+            candidate.edgeA,
+            intersectionUseA,
+            faceTol,
+            rebuiltFaceA,
+            errorMessage)) {
+        errorMessage = "Failed to rebuild faceA with surface intersection edge: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Face rebuiltFaceB;
+    if (!rebuildFaceByReplacingEdge(
+            candidate.faceB,
+            candidate.edgeB,
+            intersectionUseB,
+            faceTol,
+            rebuiltFaceB,
+            errorMessage)) {
+        errorMessage = "Failed to rebuild faceB with surface intersection edge: " + errorMessage;
+        return false;
+    }
+
+    BRepCheck_Analyzer analyzerFaceA(rebuiltFaceA);
+    if (!analyzerFaceA.IsValid()) {
+        appendMessage(
+            messages_,
+            std::string("Warning: intermediate rebuilt faceA is invalid before final validation:")
+                + describeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
+    }
+    BRepCheck_Analyzer analyzerFaceB(rebuiltFaceB);
+    if (!analyzerFaceB.IsValid()) {
+        appendMessage(
+            messages_,
+            std::string("Warning: intermediate rebuilt faceB is invalid before final validation:")
+                + describeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
+    }
+
+    TopoDS_Shape trialShape;
+    try {
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(candidate.faceA, rebuiltFaceA);
+        reshaper.Replace(candidate.faceB, rebuiltFaceB);
+        trialShape = reshaper.Apply(currentShape);
+        if (trialShape.IsNull()) {
+            errorMessage = "Replaced shape is null after surface intersection";
+            return false;
+        }
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "Surface intersection shape replacement failed: " + failureText(failure);
+        return false;
+    }
+
+    TopTools_IndexedDataMapOfShapeListOfShape repairedEdgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(trialShape, repairedEdgeFaceMap);
+    TopTools_ListOfShape intersectionFaces;
+    if (!findFacesForSameEdge(repairedEdgeFaceMap, intersectionEdge, intersectionFaces)) {
+        errorMessage = "surface intersection edge not found after shape replacement";
+        return false;
+    }
+
+    std::string pcurveRepairError;
+    for (TopTools_ListIteratorOfListOfShape it(intersectionFaces); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Value());
+        if (face.IsNull()) {
+            continue;
+        }
+
+        TopoDS_Edge intersectionUseInFace;
+        if (!findEdgeUseInFaceWire(face, intersectionEdge, intersectionUseInFace, pcurveRepairError)) {
+            errorMessage = "Failed to find surface intersection edge use after replacement: " + pcurveRepairError;
+            return false;
+        }
+
+        if (!GeometryUtils::RepairPCurveForEdgeOnFace(
+                intersectionUseInFace,
+                face,
+                pcurveTol,
+                &pcurveRepairError)) {
+            errorMessage = "Failed to repair surface intersection pcurve after replacement: "
+                + pcurveRepairError;
+            return false;
+        }
+    }
+
+    if (myParams.runShapeFixAfterRepair) {
+        try {
+            const double fixPrecision = std::max(Precision::Confusion(), myParams.shapeFixPrecision);
+            const double fixMaxTol = std::max(fixPrecision, myParams.shapeFixMaxTolerance);
+            ShapeFix_Shape fixer(trialShape);
+            fixer.SetPrecision(fixPrecision);
+            fixer.SetMaxTolerance(fixMaxTol);
+            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+            fixer.Perform();
+            TopoDS_Shape fixedShape = fixer.Shape();
+            if (!fixedShape.IsNull()) {
+                trialShape = fixedShape;
+            }
+        }
+        catch (Standard_Failure& failure) {
+            errorMessage = "ShapeFix failed after surface intersection: " + failureText(failure);
+            return false;
+        }
+    }
+
+    if (!validateEdgeReplacement(
+            currentShape,
+            trialShape,
+            intersectionEdge,
+            freeEdgesBefore,
+            pcurveTol,
+            errorMessage)) {
+        errorMessage = "surface intersection validation failed: " + errorMessage;
+        return false;
+    }
+
+    {
+        std::ostringstream os;
+        os << "Candidate repair accepted by surface intersection: candidateMaxGap=" << myParams.candidateMaxGap
+           << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+           << ", surfaceIntersectionFuzzyTol=" << myParams.surfaceIntersectionFuzzyTol
+           << ", midlineMaxGap=" << myParams.midlineMaxGap
+           << ", candidate.maxGap=" << candidate.maxGap
+           << ", candidate.meanGap=" << candidate.meanGap
+           << ", sampleCount=" << candidate.usedSampleCount
+           << ", inheritedPCurveTol=" << pcurveTol
+           << ", faceTol=" << faceTol
+           << ", shapeFixPrecision=" << myParams.shapeFixPrecision
+           << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
+        appendMessage(messages_, os.str());
+    }
+
+    repairedShape = trialShape;
+    return true;
+}
+
+bool HealNarrowGap::buildMidlineEdgeForCandidate(
+    const Candidate& candidate,
+    TopoDS_Edge& midlineEdge,
+    std::string& errorMessage) const
+{
+    midlineEdge.Nullify();
+    if (candidate.edgeA.IsNull() || candidate.edgeB.IsNull()) {
+        errorMessage = "candidate edge is null";
+        return false;
+    }
+
+    try {
+        TopoDS_Vertex aStart;
+        TopoDS_Vertex aEnd;
+        TopoDS_Vertex bStart;
+        TopoDS_Vertex bEnd;
+        if (!getEdgeVerticesOriented(candidate.edgeA, aStart, aEnd) ||
+            !getEdgeVerticesOriented(candidate.edgeB, bStart, bEnd)) {
+            errorMessage = "failed to get oriented edge vertices for midline";
+            return false;
+        }
+
+        TopoDS_Vertex bParamStartVertex;
+        TopoDS_Vertex bParamEndVertex;
+        if (aStart.IsSame(bStart) && aEnd.IsSame(bEnd)) {
+            bParamStartVertex = bStart;
+            bParamEndVertex = bEnd;
+        }
+        else if (aStart.IsSame(bEnd) && aEnd.IsSame(bStart)) {
+            bParamStartVertex = bEnd;
+            bParamEndVertex = bStart;
+        }
+        else {
+            errorMessage = "candidate edges do not share endpoints for midline";
+            return false;
+        }
+
+        const double uA0 = BRep_Tool::Parameter(aStart, candidate.edgeA);
+        const double uA1 = BRep_Tool::Parameter(aEnd, candidate.edgeA);
+        const double uB0 = BRep_Tool::Parameter(bParamStartVertex, candidate.edgeB);
+        const double uB1 = BRep_Tool::Parameter(bParamEndVertex, candidate.edgeB);
+
+        BRepAdaptor_Curve curveA(candidate.edgeA);
+        BRepAdaptor_Curve curveB(candidate.edgeB);
+        const int sampleCount = computeSampleCountForCandidate(candidate);
+
+        std::vector<gp_Pnt> midPoints;
+        midPoints.reserve(static_cast<std::size_t>(sampleCount));
+        for (int i = 0; i < sampleCount; ++i) {
+            const double t = static_cast<double>(i) / static_cast<double>(sampleCount - 1);
+            gp_Pnt point;
+            if (i == 0) {
+                // 端点沿用原拓扑顶点，保证新 edge 能与原 wire 中相邻 edge 精确连接。
+                point = BRep_Tool::Pnt(aStart);
+            }
+            else if (i + 1 == sampleCount) {
+                point = BRep_Tool::Pnt(aEnd);
+            }
+            else {
+                const gp_Pnt pointA = curveA.Value(uA0 + (uA1 - uA0) * t);
+                const gp_Pnt pointB = curveB.Value(uB0 + (uB1 - uB0) * t);
+                point.SetCoord(
+                    0.5 * (pointA.X() + pointB.X()),
+                    0.5 * (pointA.Y() + pointB.Y()),
+                    0.5 * (pointA.Z() + pointB.Z()));
+            }
+
+            if (!midPoints.empty() &&
+                point.Distance(midPoints.back()) <= Precision::Confusion()) {
+                if (i + 1 == sampleCount) {
+                    errorMessage = "midline edge has zero-length end segment";
+                    return false;
+                }
+                continue;
+            }
+            midPoints.push_back(point);
+        }
+
+        if (midPoints.size() < 2) {
+            errorMessage = "midline edge has insufficient points";
+            return false;
+        }
+
+        if (midPoints.size() == 2) {
+            BRepBuilderAPI_MakeEdge edgeMaker(aStart, aEnd);
+            if (!edgeMaker.IsDone()) {
+                errorMessage = "failed to create straight midline edge";
+                return false;
+            }
+            midlineEdge = edgeMaker.Edge();
+        }
+        else {
+            TColgp_Array1OfPnt points(1, static_cast<Standard_Integer>(midPoints.size()));
+            for (std::size_t i = 0; i < midPoints.size(); ++i) {
+                points.SetValue(static_cast<Standard_Integer>(i + 1), midPoints[i]);
+            }
+
+            GeomAPI_PointsToBSpline splineBuilder(points);
+            Handle(Geom_BSplineCurve) midlineCurve = splineBuilder.Curve();
+            if (midlineCurve.IsNull()) {
+                errorMessage = "failed to interpolate midline curve";
+                return false;
+            }
+
+            BRepBuilderAPI_MakeEdge edgeMaker(midlineCurve, aStart, aEnd);
+            if (!edgeMaker.IsDone()) {
+                errorMessage = "failed to create midline edge";
+                return false;
+            }
+            midlineEdge = edgeMaker.Edge();
+        }
+
+        if (midlineEdge.IsNull()) {
+            errorMessage = "midline edge is null";
+            return false;
+        }
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "midline edge construction failed: " + failureText(failure);
+        return false;
+    }
+
+    return true;
+}
+
+bool HealNarrowGap::tryRepairByMidlineCollapse(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    if (currentShape.IsNull()) {
+        errorMessage = "Current shape is null";
+        return false;
+    }
+    if (candidate.faceA.IsNull() || candidate.faceB.IsNull() ||
+        candidate.edgeA.IsNull() || candidate.edgeB.IsNull()) {
+        errorMessage = "Invalid candidate for midline collapse";
+        return false;
+    }
+    if (candidate.faceA.IsSame(candidate.faceB)) {
+        errorMessage = "midline collapse does not support two edges on the same face";
+        return false;
+    }
+    if (candidate.maxGap > myParams.midlineMaxGap) {
+        std::ostringstream os;
+        os << "midline gap too large: maxGap=" << candidate.maxGap
+           << ", midlineMaxGap=" << myParams.midlineMaxGap
+           << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        errorMessage = os.str();
+        return false;
+    }
+
+    const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
+    // MidlineCollapse 产生的新 edge 在替换后使用原两条 edge 的最大 tolerance 校验 pcurve。
+    const double pcurveTol = std::max({
+        Precision::Confusion(),
+        BRep_Tool::Tolerance(candidate.edgeA),
+        BRep_Tool::Tolerance(candidate.edgeB)
+        });
+
+    const double existingFaceTol = std::max({
+        Precision::Confusion(),
+        BRep_Tool::Tolerance(candidate.faceA),
+        BRep_Tool::Tolerance(candidate.faceB)
+        });
+    const double faceTol = std::min(
+        std::max(existingFaceTol, myParams.faceTol),
+        myParams.maxFaceTol);
+
+    TopoDS_Edge midlineEdge;
+    if (!buildMidlineEdgeForCandidate(candidate, midlineEdge, errorMessage)) {
+        return false;
+    }
+
+    TopoDS_Edge edgeAInWire;
+    if (!findEdgeUseInFaceWire(candidate.faceA, candidate.edgeA, edgeAInWire, errorMessage)) {
+        errorMessage = "edgeA not found in faceA wire for midline collapse: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Edge edgeBInWire;
+    if (!findEdgeUseInFaceWire(candidate.faceB, candidate.edgeB, edgeBInWire, errorMessage)) {
+        errorMessage = "edgeB not found in faceB wire for midline collapse: " + errorMessage;
+        return false;
+    }
+
+    // 新 edge 的使用方向跟随被替换 edge 在各自 wire 中的方向，而不是重新用几何端点推断。
+    TopoDS_Edge midlineUseA = midlineEdge;
+    midlineUseA.Orientation(edgeAInWire.Orientation());
+    TopoDS_Edge midlineUseB = midlineEdge;
+    midlineUseB.Orientation(edgeBInWire.Orientation());
+
+    if (!ensurePCurveOnFace(midlineUseA, candidate.faceA, pcurveTol, errorMessage)) {
+        errorMessage = "Failed to add midline pcurve on faceA: " + errorMessage;
+        return false;
+    }
+    if (!ensurePCurveOnFace(midlineUseB, candidate.faceB, pcurveTol, errorMessage)) {
+        errorMessage = "Failed to add midline pcurve on faceB: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Face rebuiltFaceA;
+    if (!rebuildFaceByReplacingEdge(
+            candidate.faceA,
+            candidate.edgeA,
+            midlineUseA,
+            faceTol,
+            rebuiltFaceA,
+            errorMessage)) {
+        errorMessage = "Failed to rebuild faceA with midline edge: " + errorMessage;
+        return false;
+    }
+
+    TopoDS_Face rebuiltFaceB;
+    if (!rebuildFaceByReplacingEdge(
+            candidate.faceB,
+            candidate.edgeB,
+            midlineUseB,
+            faceTol,
+            rebuiltFaceB,
+            errorMessage)) {
+        errorMessage = "Failed to rebuild faceB with midline edge: " + errorMessage;
+        return false;
+    }
+
+    BRepCheck_Analyzer analyzerFaceA(rebuiltFaceA);
+    if (!analyzerFaceA.IsValid()) {
+        appendMessage(
+            messages_,
+            std::string("Warning: intermediate rebuilt faceA is invalid before final validation:")
+                + describeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
+    }
+    BRepCheck_Analyzer analyzerFaceB(rebuiltFaceB);
+    if (!analyzerFaceB.IsValid()) {
+        appendMessage(
+            messages_,
+            std::string("Warning: intermediate rebuilt faceB is invalid before final validation:")
+                + describeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
+    }
+
+    TopoDS_Shape trialShape;
+    try {
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(candidate.faceA, rebuiltFaceA);
+        reshaper.Replace(candidate.faceB, rebuiltFaceB);
+        trialShape = reshaper.Apply(currentShape);
+        if (trialShape.IsNull()) {
+            errorMessage = "Replaced shape is null after midline collapse";
+            return false;
+        }
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "Midline shape replacement failed: " + failureText(failure);
+        return false;
+    }
+
+    TopTools_IndexedDataMapOfShapeListOfShape repairedEdgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(trialShape, repairedEdgeFaceMap);
+    TopTools_ListOfShape midlineFaces;
+    if (!findFacesForSameEdge(repairedEdgeFaceMap, midlineEdge, midlineFaces)) {
+        errorMessage = "midline edge not found after shape replacement";
+        return false;
+    }
+
+    std::string pcurveRepairError;
+    for (TopTools_ListIteratorOfListOfShape it(midlineFaces); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Value());
+        if (face.IsNull()) {
+            continue;
+        }
+
+        TopoDS_Edge midlineUseInFace;
+        if (!findEdgeUseInFaceWire(face, midlineEdge, midlineUseInFace, pcurveRepairError)) {
+            errorMessage = "Failed to find midline edge use after replacement: " + pcurveRepairError;
+            return false;
+        }
+
+        if (!GeometryUtils::RepairPCurveForEdgeOnFace(
+                midlineUseInFace,
+                face,
+                pcurveTol,
+                &pcurveRepairError)) {
+            errorMessage = "Failed to repair midline pcurve after replacement: " + pcurveRepairError;
+            return false;
+        }
+    }
+
+    if (myParams.runShapeFixAfterRepair) {
+        try {
+            const double fixPrecision = std::max(Precision::Confusion(), myParams.shapeFixPrecision);
+            const double fixMaxTol = std::max(fixPrecision, myParams.shapeFixMaxTolerance);
+            ShapeFix_Shape fixer(trialShape);
+            fixer.SetPrecision(fixPrecision);
+            fixer.SetMaxTolerance(fixMaxTol);
+            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+            fixer.Perform();
+            TopoDS_Shape fixedShape = fixer.Shape();
+            if (!fixedShape.IsNull()) {
+                trialShape = fixedShape;
+            }
+        }
+        catch (Standard_Failure& failure) {
+            errorMessage = "ShapeFix failed after midline collapse: " + failureText(failure);
+            return false;
+        }
+    }
+
+    if (!validateEdgeReplacement(
+            currentShape,
+            trialShape,
+            midlineEdge,
+            freeEdgesBefore,
+            pcurveTol,
+            errorMessage)) {
+        errorMessage = "midline collapse validation failed: " + errorMessage;
+        return false;
+    }
+
+    {
+        std::ostringstream os;
+        os << "Candidate repair accepted by midline collapse: candidateMaxGap=" << myParams.candidateMaxGap
+           << ", repairMaxGap=" << myParams.repairMaxGap
+           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
+           << ", midlineMaxGap=" << myParams.midlineMaxGap
+           << ", candidate.maxGap=" << candidate.maxGap
+           << ", candidate.meanGap=" << candidate.meanGap
+           << ", sampleCount=" << candidate.usedSampleCount
+           << ", inheritedPCurveTol=" << pcurveTol
            << ", faceTol=" << faceTol
            << ", shapeFixPrecision=" << myParams.shapeFixPrecision
            << ", shapeFixMaxTolerance=" << myParams.shapeFixMaxTolerance;
@@ -1440,6 +2566,7 @@ bool HealNarrowGap::validateEdgeReplacement(
     const TopoDS_Shape& repairedShape,
     const TopoDS_Edge& keptEdge,
     int freeEdgesBefore,
+    double pcurveValidationTol,
     std::string& errorMessage) const
 {
     if (!validateWholeShape(beforeShape, repairedShape, freeEdgesBefore, errorMessage)) {
@@ -1465,14 +2592,10 @@ bool HealNarrowGap::validateEdgeReplacement(
             continue;
         }
 
-        const double existingTol = std::max({
-            Precision::Confusion(),
-            BRep_Tool::Tolerance(keptEdge),
-            BRep_Tool::Tolerance(face)
-        });
-        const double pcurveCheckTol = std::min(
-            std::max(existingTol * 5.0, myParams.pcurveTol),
-            myParams.maxPCurveTol);
+        // 最终 pcurve 校验直接使用替换前两条候选 edge 继承的 tolerance。
+        // 这里不再引入 face tolerance、倍率放大或 section fuzzy tolerance。
+        const double pcurveCheckTol =
+            std::max(pcurveValidationTol, Precision::Confusion());
         std::string localError;
         if (!GeometryUtils::HasValidPCurveOnFace(keptEdge, face, pcurveCheckTol, &localError)) {
             errorMessage = "Kept edge pcurve invalid after edge replacement: " + localError;

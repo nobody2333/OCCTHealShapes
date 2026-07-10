@@ -152,7 +152,6 @@ int healNarrowGap(const std::string& fileName) {
     }
 
     HealNarrowGap::Params params;
-
     std::cout << "Healing narrow gaps......" << std::endl;
     const int repairedCount = appInit.healNarrowGapsOnLowestContainersAndExport(outputFilePath, params);
     if (repairedCount < 0) {
