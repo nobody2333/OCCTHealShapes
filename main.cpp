@@ -398,8 +398,8 @@ int main()
     std::string fileName = "h6k";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
-    healNarrowGap(fileName);
-    //healClosedGap(fileName);
+    //healNarrowGap(fileName);
+    healClosedGap(fileName);
     //mergeDuplicateVertex(fileName);
     //mergeDuplicateVertexOnStepShape(fileName);
     //sewShellsOnStepShape(fileName);

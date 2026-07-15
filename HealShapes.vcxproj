@@ -156,6 +156,7 @@
     <ClCompile Include="Logger.cpp" />
     <ClCompile Include="MergeDuplicateVertex.cpp" />
     <ClCompile Include="MergeShortEdge.cpp" />
+    <ClCompile Include="RepairDiagnostics.cpp" />
     <ClCompile Include="SewShells.cpp" />
     <ClCompile Include="TopologyUtils.cpp" />
     <ClCompile Include="TopoTools.cpp">
@@ -176,6 +177,7 @@
     <ClInclude Include="Logger.h" />
     <ClInclude Include="MergeDuplicateVertex.h" />
     <ClInclude Include="MergeShortEdge.h" />
+    <ClInclude Include="RepairDiagnostics.h" />
     <ClInclude Include="SewShells.h" />
     <ClInclude Include="TopologyUtils.h" />
     <ClInclude Include="TopoTools.h" />

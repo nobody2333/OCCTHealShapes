@@ -1,5 +1,6 @@
 #include "HealNarrowGap.h"
 #include "GeometryUtils.h"
+#include "RepairDiagnostics.h"
 #include "TopologyUtils.h"
 
 #include <algorithm>
@@ -12,15 +13,10 @@
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools_WireExplorer.hxx>
-#include <BRepCheck_Face.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
-#include <BRepCheck_ListOfStatus.hxx>
-#include <BRepCheck_ListIteratorOfListOfStatus.hxx>
-#include <BRepCheck_Result.hxx>
-#include <BRepCheck_Status.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <Extrema_ExtPC.hxx>
@@ -46,7 +42,6 @@
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
-#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 
@@ -189,258 +184,6 @@ std::string failureText(const Standard_Failure& failure)
     return message != nullptr ? std::string(message) : std::string("OCCT failure");
 }
 
-std::string replaceAll(std::string text, const std::string& from, const std::string& to)
-{
-    if (from.empty()) {
-        return text;
-    }
-
-    std::string::size_type pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        text.replace(pos, from.length(), to);
-        pos += to.length();
-    }
-    return text;
-}
-
-std::string makeFailureReasonReadable(const std::string& reason)
-{
-    if (reason.empty()) {
-        return "no detail";
-    }
-
-    std::string readable = replaceAll(reason, "; ", "\n");
-    readable = replaceAll(readable, ": ", ":\n  ");
-    return readable;
-}
-
-std::string indentMultiline(const std::string& text, const std::string& indent)
-{
-    std::ostringstream os;
-    bool atLineStart = true;
-    for (char ch : text) {
-        if (atLineStart) {
-            os << indent;
-        }
-        os << ch;
-        atLineStart = ch == '\n';
-    }
-    return os.str();
-}
-
-std::string strategyFailureBlock(const char* strategyName, const std::string& reason)
-{
-    std::ostringstream os;
-    os << "[" << strategyName << "]" << "\n"
-       << indentMultiline(makeFailureReasonReadable(reason), "  ");
-    return os.str();
-}
-
-const char* BRepCheckStatusName(BRepCheck_Status status)
-{
-    switch (status) {
-    case BRepCheck_NoError: return "NoError";
-    case BRepCheck_InvalidPointOnCurve: return "InvalidPointOnCurve";
-    case BRepCheck_InvalidPointOnCurveOnSurface: return "InvalidPointOnCurveOnSurface";
-    case BRepCheck_InvalidPointOnSurface: return "InvalidPointOnSurface";
-    case BRepCheck_No3DCurve: return "No3DCurve";
-    case BRepCheck_Multiple3DCurve: return "Multiple3DCurve";
-    case BRepCheck_Invalid3DCurve: return "Invalid3DCurve";
-    case BRepCheck_NoCurveOnSurface: return "NoCurveOnSurface";
-    case BRepCheck_InvalidCurveOnSurface: return "InvalidCurveOnSurface";
-    case BRepCheck_InvalidCurveOnClosedSurface: return "InvalidCurveOnClosedSurface";
-    case BRepCheck_InvalidSameRangeFlag: return "InvalidSameRangeFlag";
-    case BRepCheck_InvalidSameParameterFlag: return "InvalidSameParameterFlag";
-    case BRepCheck_InvalidDegeneratedFlag: return "InvalidDegeneratedFlag";
-    case BRepCheck_FreeEdge: return "FreeEdge";
-    case BRepCheck_InvalidMultiConnexity: return "InvalidMultiConnexity";
-    case BRepCheck_InvalidRange: return "InvalidRange";
-    case BRepCheck_EmptyWire: return "EmptyWire";
-    case BRepCheck_RedundantEdge: return "RedundantEdge";
-    case BRepCheck_SelfIntersectingWire: return "SelfIntersectingWire";
-    case BRepCheck_NoSurface: return "NoSurface";
-    case BRepCheck_InvalidWire: return "InvalidWire";
-    case BRepCheck_RedundantWire: return "RedundantWire";
-    case BRepCheck_IntersectingWires: return "IntersectingWires";
-    case BRepCheck_InvalidImbricationOfWires: return "InvalidImbricationOfWires";
-    case BRepCheck_EmptyShell: return "EmptyShell";
-    case BRepCheck_RedundantFace: return "RedundantFace";
-    case BRepCheck_UnorientableShape: return "UnorientableShape";
-    case BRepCheck_NotClosed: return "NotClosed";
-    case BRepCheck_NotConnected: return "NotConnected";
-    case BRepCheck_SubshapeNotInShape: return "SubshapeNotInShape";
-    case BRepCheck_BadOrientation: return "BadOrientation";
-    case BRepCheck_BadOrientationOfSubshape: return "BadOrientationOfSubshape";
-    case BRepCheck_InvalidToleranceValue: return "InvalidToleranceValue";
-    case BRepCheck_CheckFail: return "CheckFail";
-    default: return "Unknown";
-    }
-}
-
-std::string describeBRepCheckFailures(BRepCheck_Analyzer& analyzer, const TopoDS_Shape& shape)
-{
-    std::ostringstream os;
-    TopTools_IndexedMapOfShape allShapes;
-    TopExp::MapShapes(shape, allShapes);
-
-    int reported = 0;
-    constexpr int maxReported = 30;
-    for (int i = 1; i <= allShapes.Extent() && reported < maxReported; ++i) {
-        const TopoDS_Shape& subShape = allShapes.FindKey(i);
-        Handle(BRepCheck_Result) result = analyzer.Result(subShape);
-        if (result.IsNull()) {
-            continue;
-        }
-
-        bool hasError = false;
-        std::ostringstream statusStream;
-        const BRepCheck_ListOfStatus& statuses = result->Status();
-        for (BRepCheck_ListIteratorOfListOfStatus it(statuses); it.More(); it.Next()) {
-            const BRepCheck_Status status = it.Value();
-            if (status == BRepCheck_NoError) {
-                continue;
-            }
-            if (hasError) {
-                statusStream << ",";
-            }
-            statusStream << BRepCheckStatusName(status);
-            hasError = true;
-        }
-
-        if (!hasError) {
-            continue;
-        }
-        
-        os << " [subshape#" << i
-           << " type=" << static_cast<int>(subShape.ShapeType())
-           << " status=" << statusStream.str() << "]";
-        ++reported;
-    }
-
-    if (reported == maxReported) {
-        os << " ...";
-    }
-
-    return os.str();
-}
-
-struct BRepCheckFailureInfo {
-    TopoDS_Shape shape;
-    TopAbs_ShapeEnum type = TopAbs_SHAPE;
-    std::vector<BRepCheck_Status> statuses;
-};
-
-bool containsStatus(const std::vector<BRepCheck_Status>& statuses, BRepCheck_Status status)
-{
-    return std::find(statuses.begin(), statuses.end(), status) != statuses.end();
-}
-
-bool statusesAreSubset(
-    const std::vector<BRepCheck_Status>& statuses,
-    const std::vector<BRepCheck_Status>& existingStatuses)
-{
-    for (const BRepCheck_Status status : statuses) {
-        if (!containsStatus(existingStatuses, status)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-std::vector<BRepCheckFailureInfo> collectBRepCheckFailures(
-    const TopoDS_Shape& shape,
-    std::string* errorMessage = nullptr)
-{
-    std::vector<BRepCheckFailureInfo> failures;
-    if (shape.IsNull()) {
-        if (errorMessage != nullptr) {
-            *errorMessage = "Shape is null";
-        }
-        return failures;
-    }
-
-    try {
-        BRepCheck_Analyzer analyzer(shape, Standard_True);
-        TopTools_IndexedMapOfShape allShapes;
-        TopExp::MapShapes(shape, allShapes);
-
-        for (int i = 1; i <= allShapes.Extent(); ++i) {
-            const TopoDS_Shape& subShape = allShapes.FindKey(i);
-            Handle(BRepCheck_Result) result = analyzer.Result(subShape);
-            if (result.IsNull()) {
-                continue;
-            }
-
-            BRepCheckFailureInfo failure;
-            failure.shape = subShape;
-            failure.type = subShape.ShapeType();
-
-            const BRepCheck_ListOfStatus& statuses = result->Status();
-            for (BRepCheck_ListIteratorOfListOfStatus it(statuses); it.More(); it.Next()) {
-                const BRepCheck_Status status = it.Value();
-                if (status == BRepCheck_NoError || containsStatus(failure.statuses, status)) {
-                    continue;
-                }
-                failure.statuses.push_back(status);
-            }
-
-            if (!failure.statuses.empty()) {
-                failures.push_back(failure);
-            }
-        }
-    }
-    catch (Standard_Failure& failure) {
-        if (errorMessage != nullptr) {
-            *errorMessage = "BRepCheck failure collection failed: " + failureText(failure);
-        }
-    }
-
-    return failures;
-}
-
-// 判断 failure 是否属于修复前已经存在的 BRepCheck 问题。
-bool isPreExistingBRepCheckFailure(
-    const BRepCheckFailureInfo& failure,
-    const std::vector<BRepCheckFailureInfo>& existingFailures)
-{
-    for (const BRepCheckFailureInfo& existingFailure : existingFailures) {
-        if (failure.type != existingFailure.type || !failure.shape.IsSame(existingFailure.shape)) {
-            continue;
-        }
-
-        if (statusesAreSubset(failure.statuses, existingFailure.statuses)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-std::string describeBRepCheckFailureList(const std::vector<BRepCheckFailureInfo>& failures)
-{
-    std::ostringstream os;
-    int reported = 0;
-    constexpr int maxReported = 30;
-    for (const BRepCheckFailureInfo& failure : failures) {
-        if (reported >= maxReported) {
-            os << " ...";
-            break;
-        }
-
-        os << " [type=" << static_cast<int>(failure.type) << " status=";
-        for (std::size_t i = 0; i < failure.statuses.size(); ++i) {
-            if (i > 0) {
-                os << ",";
-            }
-            os << BRepCheckStatusName(failure.statuses[i]);
-        }
-        os << "]";
-        ++reported;
-    }
-
-    return os.str();
-}
-
 bool findFacesForSameEdge(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
                           const TopoDS_Edge& edge,
                           TopTools_ListOfShape& faces)
@@ -543,28 +286,11 @@ int HealNarrowGap::perform()
         appendMessage(messages_, os.str());
     }
 
-    std::string originalCheckError;
-    const std::vector<BRepCheckFailureInfo> originalFailures =
-        collectBRepCheckFailures(currentShape, &originalCheckError);
-    if (!originalCheckError.empty()) {
-        appendMessage(messages_, "Original shape BRepCheck failed: " + originalCheckError);
-    }
-    else if (!originalFailures.empty()) {
-        std::ostringstream os;
-        os << "Original shape has existing BRepCheck failures:"
-           << describeBRepCheckFailureList(originalFailures);
-        appendMessage(messages_, os.str());
-    }
-    else {
-        appendMessage(messages_, "Original shape has no BRepCheck failures");
-    }
+    RepairDiagnostics::AppendShapeCheckSummary(messages_, "Original shape", currentShape);
 
     for (int iter = 0; iter < iterationLimit; ++iter) {
 
-        if (iter > 0) {
-            appendMessage(messages_, "");
-        }
-		appendMessage(messages_, "=== Iteration " + std::to_string(iter + 1) + " ===");
+        RepairDiagnostics::AppendIterationHeader(messages_, iter + 1, iter > 0);
         // edgeFaceMap 记录每条 edge 的相邻 face，用于判定单面边和 free edge。
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
@@ -604,7 +330,9 @@ int HealNarrowGap::perform()
                            << "\n  tangentScore=" << candidate.tangentScore
                            << "\n  sampleCount=" << candidate.usedSampleCount
                            << "\n  reason:"
-                           << "\n" << indentMultiline(makeFailureReasonReadable(errorMessage), "    ");
+                           << "\n" << RepairDiagnostics::IndentMultiline(
+                               RepairDiagnostics::MakeFailureReasonReadable(errorMessage),
+                               "    ");
                 appendMessage(messages_, failStream.str());
                 continue;
             }
@@ -645,26 +373,8 @@ int HealNarrowGap::perform()
     }
 
     resultShape_ = currentShape;
-    {
-        std::string finalCheckError;
-        const std::vector<BRepCheckFailureInfo> existingFailures =
-            collectBRepCheckFailures(resultShape_, &finalCheckError);
-        if (!finalCheckError.empty()) {
-            appendMessage(messages_, "");
-            appendMessage(messages_, "Result shape BRepCheck failed: " + finalCheckError);
-        }
-        else if (!existingFailures.empty()) {
-            appendMessage(messages_, "");
-            std::ostringstream os;
-            os << "Result shape has existing BRepCheck failures:"
-               << describeBRepCheckFailureList(existingFailures);
-            appendMessage(messages_, os.str());
-        }
-        else {
-            appendMessage(messages_, "");
-            appendMessage(messages_, "Result shape has no BRepCheck failures");
-        }
-    }
+    appendMessage(messages_, "");
+    RepairDiagnostics::AppendShapeCheckSummary(messages_, "Result shape", resultShape_);
 
     return repairedCount_;
 }
@@ -1267,7 +977,8 @@ bool HealNarrowGap::tryRepairCandidate(
             if (!sideError.empty()) {
                 std::ostringstream os;
                 os << "Warning: repaired by surface intersection after earlier strategy failed:"
-                   << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ");
+                   << "\n" << RepairDiagnostics::IndentMultiline(
+                       RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ");
                 appendMessage(messages_, os.str());
             }
             return true;
@@ -1287,9 +998,12 @@ bool HealNarrowGap::tryRepairCandidate(
         midlineGapError << "midline gap too large: maxGap=" << candidate.maxGap
                         << ", midlineMaxGap=" << myParams.midlineMaxGap;
         os << "Auto repair failed:"
-           << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ")
-           << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
-           << "\n" << indentMultiline(strategyFailureBlock("MidlineCollapse", midlineGapError.str()), "  ");
+           << "\n" << RepairDiagnostics::IndentMultiline(
+               RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ")
+           << "\n" << RepairDiagnostics::IndentMultiline(
+               RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
+           << "\n" << RepairDiagnostics::IndentMultiline(
+               RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineGapError.str()), "  ");
         errorMessage = os.str();
         return false;
     }
@@ -1299,8 +1013,10 @@ bool HealNarrowGap::tryRepairCandidate(
         if (!sideError.empty()) {
             std::ostringstream os;
             os << "Warning: repaired by midline collapse after earlier strategies failed:"
-               << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ")
-               << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ");
+               << "\n" << RepairDiagnostics::IndentMultiline(
+                   RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ")
+               << "\n" << RepairDiagnostics::IndentMultiline(
+                   RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ");
             appendMessage(messages_, os.str());
         }
         return true;
@@ -1310,10 +1026,13 @@ bool HealNarrowGap::tryRepairCandidate(
         std::ostringstream os;
         os << "Auto repair failed:";
         if (!sideError.empty()) {
-            os << "\n" << indentMultiline(strategyFailureBlock("ReplaceOneSide", sideError), "  ");
+            os << "\n" << RepairDiagnostics::IndentMultiline(
+                RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ");
         }
-        os << "\n" << indentMultiline(strategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
-           << "\n" << indentMultiline(strategyFailureBlock("MidlineCollapse", midlineError), "  ");
+        os << "\n" << RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
+           << "\n" << RepairDiagnostics::IndentMultiline(
+               RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ");
         errorMessage = os.str();
     }
     return false;
@@ -1398,7 +1117,8 @@ bool HealNarrowGap::tryRepairByReplacingOneSide(
         std::ostringstream warning;
         warning << "Warning: precheck found invalid pcurve on edge to be replaced; "
                 << "continue one-side replacement:"
-                << "\n" << indentMultiline(makeFailureReasonReadable(edgeToReplacePCurveError), "  ");
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::MakeFailureReasonReadable(edgeToReplacePCurveError), "  ");
         appendMessage(messages_, warning.str());
     }
 
@@ -1419,7 +1139,7 @@ bool HealNarrowGap::tryRepairByReplacingOneSide(
         appendMessage(
             messages_,
             std::string("Warning: intermediate rebuilt face is invalid before shape replacement and final validation:")
-                + describeBRepCheckFailures(analyzerFace, rebuiltFace));
+                + RepairDiagnostics::DescribeBRepCheckFailures(analyzerFace, rebuiltFace));
 	}
 
     // trialShape 是将目标 face 边界重建后的试运行shape。
@@ -1855,14 +1575,14 @@ bool HealNarrowGap::tryRepairBySurfaceIntersection(
         appendMessage(
             messages_,
             std::string("Warning: intermediate rebuilt faceA is invalid before final validation:")
-                + describeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
+                + RepairDiagnostics::DescribeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
     }
     BRepCheck_Analyzer analyzerFaceB(rebuiltFaceB);
     if (!analyzerFaceB.IsValid()) {
         appendMessage(
             messages_,
             std::string("Warning: intermediate rebuilt faceB is invalid before final validation:")
-                + describeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
+                + RepairDiagnostics::DescribeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
     }
 
     TopoDS_Shape trialShape;
@@ -2198,14 +1918,14 @@ bool HealNarrowGap::tryRepairByMidlineCollapse(
         appendMessage(
             messages_,
             std::string("Warning: intermediate rebuilt faceA is invalid before final validation:")
-                + describeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
+                + RepairDiagnostics::DescribeBRepCheckFailures(analyzerFaceA, rebuiltFaceA));
     }
     BRepCheck_Analyzer analyzerFaceB(rebuiltFaceB);
     if (!analyzerFaceB.IsValid()) {
         appendMessage(
             messages_,
             std::string("Warning: intermediate rebuilt faceB is invalid before final validation:")
-                + describeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
+                + RepairDiagnostics::DescribeBRepCheckFailures(analyzerFaceB, rebuiltFaceB));
     }
 
     TopoDS_Shape trialShape;
@@ -2519,33 +2239,30 @@ bool HealNarrowGap::validateWholeShape(
     }
 
     std::string existingError;
-    const std::vector<BRepCheckFailureInfo> existingFailures =
-        collectBRepCheckFailures(beforeShape, &existingError);
+    const RepairDiagnostics::FailureList existingFailures =
+        RepairDiagnostics::CollectBRepCheckFailures(beforeShape, &existingError);
     if (!existingError.empty()) {
         errorMessage = "Existing BRepCheck failure collection failed before replacement: " + existingError;
         return false;
     }
 
     std::string repairedError;
-    const std::vector<BRepCheckFailureInfo> repairedFailures = collectBRepCheckFailures(repairedShape, &repairedError);
+    const RepairDiagnostics::FailureList repairedFailures =
+        RepairDiagnostics::CollectBRepCheckFailures(repairedShape, &repairedError);
     if (!repairedError.empty()) {
         errorMessage = "Repaired shape BRepCheck failed: " + repairedError;
         return false;
     }
 
-    std::vector<BRepCheckFailureInfo> newFailures;
-    for (const BRepCheckFailureInfo& failure : repairedFailures) {
-        if (!isPreExistingBRepCheckFailure(failure, existingFailures)) {
-            newFailures.push_back(failure);
-        }
-    }
+    const RepairDiagnostics::FailureList newFailures =
+        RepairDiagnostics::FindNewBRepCheckFailures(existingFailures, repairedFailures);
 
     if (!newFailures.empty()) {
         errorMessage = "New BRepCheck failures after replacement:";
-        errorMessage += describeBRepCheckFailureList(newFailures);
+        errorMessage += RepairDiagnostics::DescribeBRepCheckFailures(newFailures);
         if (!existingFailures.empty()) {
             errorMessage += " existing failures:";
-            errorMessage += describeBRepCheckFailureList(existingFailures);
+            errorMessage += RepairDiagnostics::DescribeBRepCheckFailures(existingFailures);
         }
         return false;
     }
