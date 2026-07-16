@@ -1,0 +1,18 @@
+#pragma once
+
+#include "HealClosedNarrowGap.h"
+#include "HealNarrowGap.h"
+#include "ShapeRepairPipeline.h"
+
+// 将当前已有修复类适配为通用流水线阶段。
+// 新模块可以在这里增加便捷工厂，也可以在调用处直接构造自定义 Stage。
+namespace ShapeRepairStages
+{
+    ShapeRepairPipeline::Stage MakeHealNarrowGapStage(
+        const HealNarrowGap::Params& params = HealNarrowGap::Params(),
+        bool enabled = true);
+
+    ShapeRepairPipeline::Stage MakeHealClosedNarrowGapStage(
+        const HealClosedNarrowGap::Params& params = HealClosedNarrowGap::Params(),
+        bool enabled = true);
+}

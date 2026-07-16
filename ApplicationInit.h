@@ -19,6 +19,7 @@
 #include "HealNarrowGap.h"
 #include "HealClosedNarrowGap.h"
 #include "MergeDuplicateVertex.h"
+#include "ShapeRepairPipeline.h"
 #include "SewShells.h"
 
 class ApplicationInit {
@@ -59,6 +60,10 @@ public:
         const std::string& filePath,
         const MergeDuplicateVertex::Params& duplicateVertexParams = MergeDuplicateVertex::Params(),
         const HealNarrowGap::Params& narrowGapParams = HealNarrowGap::Params());
+    // 在每个最低可编辑容器上执行调用方配置的修复流水线，最后统一写回并导出。
+    int runRepairPipelineOnLowestContainersAndExport(
+        const std::string& filePath,
+        const ShapeRepairPipeline& pipeline);
 
     std::vector<TopoDS_Shape> getAllShapes() const;
     std::vector<TopoDS_Solid> getAllSolids() const;

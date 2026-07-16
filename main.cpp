@@ -12,6 +12,8 @@
 
 #include "ApplicationInit.h"
 #include "GeometryUtils.h"
+#include "ShapeRepairPipeline.h"
+#include "ShapeRepairStages.h"
 #include "SewShells.h"
 #include "TopoTools.h"
 #include "Viewer.h"
@@ -393,17 +395,74 @@ int mergeDuplicateVertexAndHealNarrowGap(const std::string& fileName) {
     return repairedCount;
 }
 
+// 通用修复流水线调用入口：通过 enabled 开关选择模块，addStage 顺序决定执行顺序。
+int runShapeRepairPipeline(const std::string& fileName) {
+    const std::string inputFilePath = "./assets/" + fileName + ".stp";
+    const std::filesystem::path outputDirectory = "./assets/fixedRepairPipeline";
+    std::filesystem::create_directories(outputDirectory);
+    const std::string outputFilePath =
+        (outputDirectory / ("RepairPipeline_" + fileName + ".stp")).string();
+
+    ApplicationInit appInit;
+    const auto startTime = std::chrono::system_clock::now();
+    if (!appInit.importStep(inputFilePath)) {
+        std::cerr << "Reading file failed: " << inputFilePath << std::endl;
+        return -1;
+    }
+
+    // 调整这些开关即可指定参与本次修复的模块。
+    const bool enableHealNarrowGap = true;
+    const bool enableHealClosedNarrowGap = true;
+
+    ShapeRepairPipeline::Params pipelineParams;
+    pipelineParams.rejectShapeTypeChange = true;
+    pipelineParams.validateAfterEachStage = true;
+    pipelineParams.validateFinalResult = true;
+    ShapeRepairPipeline pipeline(pipelineParams);
+
+    HealNarrowGap::Params narrowGapParams;
+    HealClosedNarrowGap::Params closedNarrowGapParams;
+
+    // 添加顺序就是执行顺序：先处理同端点双边细缝，再处理闭合多段细缝。
+    pipeline.addStage(ShapeRepairStages::MakeHealNarrowGapStage(
+        narrowGapParams,
+        enableHealNarrowGap));
+    pipeline.addStage(ShapeRepairStages::MakeHealClosedNarrowGapStage(
+        closedNarrowGapParams,
+        enableHealClosedNarrowGap));
+
+    std::cout << "Running configured shape repair pipeline......" << std::endl;
+    const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
+        outputFilePath,
+        pipeline);
+    if (repairedCount < 0) {
+        std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
+        return -1;
+    }
+
+    std::cout << "Repair pipeline committed operation count: "
+              << repairedCount << std::endl;
+    std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+
+    const auto endTime = std::chrono::system_clock::now();
+    std::cout << "Total cost: "
+              << std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count()
+              << " s" << std::endl;
+    return repairedCount;
+}
+
 int main()
 {
     std::string fileName = "h6k";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);
-    healClosedGap(fileName);
+    //healClosedGap(fileName);
     //mergeDuplicateVertex(fileName);
     //mergeDuplicateVertexOnStepShape(fileName);
     //sewShellsOnStepShape(fileName);
     //mergeDuplicateVertexAndHealNarrowGap(fileName);
 	//sewShellsOnStepShape("h6k");
+	runShapeRepairPipeline(fileName);
     return 0;
 }

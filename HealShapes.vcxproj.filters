@@ -60,6 +60,12 @@
     <ClCompile Include="RepairDiagnostics.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="ShapeRepairPipeline.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ShapeRepairStages.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Viewer.h">
@@ -99,6 +105,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="RepairDiagnostics.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ShapeRepairPipeline.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ShapeRepairStages.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

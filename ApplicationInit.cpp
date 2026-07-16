@@ -27,6 +27,7 @@
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include "TopologyUtils.h"
+#include "RepairDiagnostics.h"
 
 namespace {
     std::string labelEntryString(const TDF_Label& label)
@@ -1193,6 +1194,211 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
     }
 
     return repairedCount;
+}
+
+int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
+    const std::string& filePath,
+    const ShapeRepairPipeline& pipeline)
+{
+    const std::filesystem::path outputPath(filePath);
+    const std::filesystem::path outputDirectory = outputPath.parent_path().empty()
+        ? std::filesystem::path(".")
+        : outputPath.parent_path();
+    const std::filesystem::path pipelineLogPath =
+        outputDirectory / "ShapeRepairPipelineLog.txt";
+    std::filesystem::create_directories(outputDirectory);
+
+    {
+        std::ofstream logFile(pipelineLogPath, std::ios::out | std::ios::trunc);
+        if (logFile) {
+            logFile << "ShapeRepairPipeline log" << std::endl;
+            logFile << "Output STEP: " << filePath << std::endl;
+            logFile << "Configured stages:" << std::endl;
+            const std::vector<ShapeRepairPipeline::Stage>& stages = pipeline.getStages();
+            if (stages.empty()) {
+                logFile << "  (none)" << std::endl;
+            }
+            for (std::size_t stageIndex = 0; stageIndex < stages.size(); ++stageIndex) {
+                logFile << "  " << stageIndex << ": "
+                        << (stages[stageIndex].name.empty() ? "UnnamedStage" : stages[stageIndex].name)
+                        << ", enabled=" << (stages[stageIndex].enabled ? "true" : "false")
+                        << std::endl;
+            }
+            logFile << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Cannot open repair pipeline log file: "
+                      << pipelineLogPath.string() << std::endl;
+        }
+    }
+
+    if (pipeline.empty()) {
+        std::cerr << "Error: Cannot run an empty repair pipeline." << std::endl;
+        return 0;
+    }
+
+    if (aDoc_.IsNull()) {
+        std::cerr << "Error: Cannot run repair pipeline because the XCAF document is null."
+                  << std::endl;
+        return 0;
+    }
+
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) {
+        std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        return 0;
+    }
+
+    std::vector<EditableContainerTarget> targets;
+    collectTopLevelTargets(targets);
+    if (targets.empty()) {
+        std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        return 0;
+    }
+
+    int totalRepairCount = 0;
+    int replacedContainerCount = 0;
+    for (std::size_t containerIndex = 0; containerIndex < targets.size(); ++containerIndex) {
+        const EditableContainerTarget& target = targets[containerIndex];
+        if (target.ownerLabel.IsNull()) {
+            std::cerr << "Container " << containerIndex << " has no owner label, skip."
+                      << std::endl;
+            continue;
+        }
+
+        const TopoDS_Shape currentShape = shapeTool->GetShape(target.ownerLabel);
+        const TopoDS_Shape originalShape = currentShape.IsNull()
+            ? target.originalShape
+            : currentShape;
+        if (originalShape.IsNull()) {
+            std::cerr << "Container " << containerIndex << " has null shape, skip."
+                      << std::endl;
+            continue;
+        }
+
+        const ShapeRepairPipeline::Result pipelineResult = pipeline.perform(originalShape);
+
+        {
+            std::ofstream logFile(pipelineLogPath, std::ios::out | std::ios::app);
+            if (logFile) {
+                logFile << "[Container " << containerIndex << "]"
+                        << ", inputShapeType=" << TopologyUtils::ShapeTypeName(originalShape)
+                        << std::endl << std::endl;
+
+                for (std::size_t stageIndex = 0;
+                     stageIndex < pipelineResult.stageReports.size();
+                     ++stageIndex) {
+                    const ShapeRepairPipeline::StageReport& report =
+                        pipelineResult.stageReports[stageIndex];
+
+                    const char* status = "skipped";
+                    if (!report.enabled) {
+                        status = "disabled";
+                    }
+                    else if (!report.rejectionReason.empty()) {
+                        status = "rejected";
+                    }
+                    else if (report.accepted && report.modified) {
+                        status = "accepted";
+                    }
+                    else if (report.accepted) {
+                        status = "no-change";
+                    }
+
+                    logFile << "  [Stage " << stageIndex << ": " << report.name << "]"
+                            << std::endl;
+                    logFile << "    status=" << status
+                            << ", executed=" << (report.executed ? "true" : "false")
+                            << ", modified=" << (report.modified ? "true" : "false")
+                            << ", repairCount=" << report.repairCount
+                            << ", inputShapeType=" << TopologyUtils::ShapeTypeName(report.inputShapeType)
+                            << ", outputShapeType=" << TopologyUtils::ShapeTypeName(report.outputShapeType)
+                            << std::endl;
+
+                    if (!report.rejectionReason.empty()) {
+                        logFile << "    rejectionReason:" << std::endl
+                                << RepairDiagnostics::IndentMultiline(
+                                       RepairDiagnostics::MakeFailureReasonReadable(
+                                           report.rejectionReason),
+                                       "      ")
+                                << std::endl;
+                    }
+
+                    if (report.messages.empty()) {
+                        logFile << "    (no messages)" << std::endl;
+                    }
+                    for (const std::string& message : report.messages) {
+                        if (message.empty()) {
+                            logFile << std::endl;
+                            continue;
+                        }
+                        logFile << RepairDiagnostics::IndentMultiline(
+                                       "- " + message,
+                                       "    ")
+                                << std::endl;
+                    }
+                    logFile << std::endl;
+                }
+
+                if (!pipelineResult.messages.empty()) {
+                    logFile << "  [Pipeline messages]" << std::endl;
+                    for (const std::string& message : pipelineResult.messages) {
+                        logFile << RepairDiagnostics::IndentMultiline(
+                                       "- " + message,
+                                       "    ")
+                                << std::endl;
+                    }
+                    logFile << std::endl;
+                }
+
+                logFile << "  [Pipeline result]"
+                        << ", modified=" << (pipelineResult.modified ? "true" : "false")
+                        << ", rolledBack=" << (pipelineResult.rolledBack ? "true" : "false")
+                        << ", totalRepairCount=" << pipelineResult.totalRepairCount
+                        << std::endl << std::endl;
+            }
+            else {
+                std::cerr << "Warning: Cannot append repair pipeline log file: "
+                          << pipelineLogPath.string() << std::endl;
+            }
+        }
+
+        if (!pipelineResult.modified) {
+            continue;
+        }
+
+        if (pipelineResult.resultShape.IsNull()) {
+            std::cerr << "Container " << containerIndex
+                      << " pipeline produced a null result, keep original shape."
+                      << std::endl;
+            continue;
+        }
+
+        if (pipelineResult.resultShape.ShapeType() != originalShape.ShapeType()) {
+            std::cerr << "Container " << containerIndex
+                      << " pipeline changed shape type, keep original shape."
+                      << std::endl;
+            continue;
+        }
+
+        // 整条链完成后只回写一次，避免中间结果使 XCAF reference 反复失效。
+        shapeTool->SetShape(target.ownerLabel, pipelineResult.resultShape);
+        totalRepairCount += pipelineResult.totalRepairCount;
+        ++replacedContainerCount;
+    }
+
+    shapeTool->UpdateAssemblies();
+    refreshShapeCache();
+    std::cout << "Replaced lowest containers after repair pipeline: "
+              << replacedContainerCount << std::endl;
+    std::cout << "Repair pipeline committed operation count: "
+              << totalRepairCount << std::endl;
+
+    if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        return -1;
+    }
+
+    return totalRepairCount;
 }
 
 bool ApplicationInit::writeXcafDocumentStep(const Handle(TDocStd_Document)& doc,
