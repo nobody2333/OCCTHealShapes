@@ -27,12 +27,14 @@ namespace
         return errorMessage.empty();
     }
 
-    std::string describeNewFailures(
+    std::string describeFailureCountIncrease(
         const RepairDiagnostics::FailureList& existingFailures,
         const RepairDiagnostics::FailureList& resultFailures)
     {
         const RepairDiagnostics::FailureList newFailures =
-            RepairDiagnostics::FindNewBRepCheckFailures(existingFailures, resultFailures);
+            RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+                existingFailures,
+                resultFailures);
         if (newFailures.empty()) {
             return {};
         }
@@ -193,7 +195,7 @@ ShapeRepairPipeline::Result ShapeRepairPipeline::perform(const TopoDS_Shape& inp
             }
 
             if (hasStageFailureBaseline) {
-                report.rejectionReason = describeNewFailures(
+                report.rejectionReason = describeFailureCountIncrease(
                     stageInputFailures,
                     stageResultFailures);
                 if (!report.rejectionReason.empty()) {
@@ -227,7 +229,7 @@ ShapeRepairPipeline::Result ShapeRepairPipeline::perform(const TopoDS_Shape& inp
             pipelineResult.totalRepairCount = 0;
         }
         else {
-            const std::string newFailureDescription = describeNewFailures(
+            const std::string newFailureDescription = describeFailureCountIncrease(
                 originalFailures,
                 finalFailures);
             if (!newFailureDescription.empty()) {

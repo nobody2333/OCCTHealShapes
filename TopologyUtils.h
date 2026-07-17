@@ -23,6 +23,11 @@ public:
     static void BuildEdgeFaceMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map);
 
     /// <summary>
+    /// 构建 face -> ancestor shells 映射，并去除重复 shell。
+    /// </summary>
+    static void BuildFaceShellMap(const TopoDS_Shape& shape, TopTools_IndexedDataMapOfShapeListOfShape& map);
+
+    /// <summary>
     /// 获取顶点连接的唯一 edge 数量。
     /// </summary>
     /// <param name="vertex">需要获取度数的顶点。</param>

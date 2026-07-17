@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <map>
 #include <sstream>
 
 #include <BRep_Builder.hxx>
@@ -98,46 +97,6 @@ std::string describeEdgeFaceCounts(
     }
     os << "]";
     return os.str();
-}
-
-RepairDiagnostics::FailureList findBRepCheckFailureCountIncrease(
-    const RepairDiagnostics::FailureList& existingFailures,
-    const RepairDiagnostics::FailureList& resultFailures)
-{
-    using FailureKey = std::pair<int, int>;
-    std::map<FailureKey, int> remainingExistingCounts;
-    for (const RepairDiagnostics::BRepCheckFailureInfo& failure : existingFailures) {
-        for (const BRepCheck_Status status : failure.statuses) {
-            ++remainingExistingCounts[FailureKey(
-                static_cast<int>(failure.type),
-                static_cast<int>(status))];
-        }
-    }
-
-    RepairDiagnostics::FailureList increasedFailures;
-    for (const RepairDiagnostics::BRepCheckFailureInfo& failure : resultFailures) {
-        RepairDiagnostics::BRepCheckFailureInfo increasedFailure;
-        increasedFailure.shape = failure.shape;
-        increasedFailure.type = failure.type;
-
-        for (const BRepCheck_Status status : failure.statuses) {
-            const FailureKey key(
-                static_cast<int>(failure.type),
-                static_cast<int>(status));
-            auto existingIt = remainingExistingCounts.find(key);
-            if (existingIt != remainingExistingCounts.end() && existingIt->second > 0) {
-                --existingIt->second;
-            }
-            else {
-                increasedFailure.statuses.push_back(status);
-            }
-        }
-
-        if (!increasedFailure.statuses.empty()) {
-            increasedFailures.push_back(increasedFailure);
-        }
-    }
-    return increasedFailures;
 }
 
 TopoDS_Face firstFaceInList(const TopTools_ListOfShape& shapes)
@@ -1922,7 +1881,9 @@ bool HealClosedNarrowGap::validateRepairResult(
 
     // face 重建会改变 TShape 身份；按错误类型和状态的数量比较，避免把旧错误迁移误判为新增。
     const RepairDiagnostics::FailureList newFailures =
-        findBRepCheckFailureCountIncrease(existingFailures, repairedFailures);
+        RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+            existingFailures,
+            repairedFailures);
 
     if (!newFailures.empty() && params_.rejectInvalidResult) {
         errorMessage = "new BRepCheck failures after closed narrow gap repair:"

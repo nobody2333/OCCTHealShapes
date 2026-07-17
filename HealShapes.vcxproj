@@ -141,7 +141,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>D:\OCCHealShapes\lib;D:\OCCHealShapes\occt_vc14-64-with-debug\win64\vc14\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>geom.lib;topo.lib;nlopt.lib;TKernel.lib;TKMath.lib;TKBRep.lib;TKG2d.lib;TKG3d.lib;TKGeomBase.lib;TKDESTEP.lib;TKDE.lib;TKDEIGES.lib;TKXSBase.lib;TKXCAF.lib;TKPrim.lib;TKOpenGl.lib;TKService.lib;TKV3d.lib;TKTopAlgo.lib;TKMesh.lib;TKShHealing.lib;TKLCAF.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>geom.lib;topo.lib;nlopt.lib;TKernel.lib;TKMath.lib;TKBRep.lib;TKG2d.lib;TKG3d.lib;TKGeomBase.lib;TKDESTEP.lib;TKDE.lib;TKDEIGES.lib;TKXSBase.lib;TKXCAF.lib;TKPrim.lib;TKOpenGl.lib;TKService.lib;TKV3d.lib;TKTopAlgo.lib;TKMesh.lib;TKShHealing.lib;TKLCAF.lib;TKFillet.lib;TKBool.lib;TKOffset.lib;TKGeomAlgo.lib;TKBO.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -153,6 +153,7 @@
     </ClCompile>
     <ClCompile Include="GeometryUtils.cpp" />
     <ClCompile Include="HealNarrowGap.cpp" />
+    <ClCompile Include="HealSimpleHole.cpp" />
     <ClCompile Include="Logger.cpp" />
     <ClCompile Include="MergeDuplicateVertex.cpp" />
     <ClCompile Include="MergeShortEdge.cpp" />
@@ -176,6 +177,7 @@
     <ClInclude Include="GeometryUtils.h" />
     <ClInclude Include="HealClosedNarrowGap.h" />
     <ClInclude Include="HealNarrowGap.h" />
+    <ClInclude Include="HealSimpleHole.h" />
     <ClInclude Include="Logger.h" />
     <ClInclude Include="MergeDuplicateVertex.h" />
     <ClInclude Include="MergeShortEdge.h" />

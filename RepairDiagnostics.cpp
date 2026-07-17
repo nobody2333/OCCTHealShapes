@@ -1,6 +1,7 @@
 #include "RepairDiagnostics.h"
 
 #include <algorithm>
+#include <map>
 #include <sstream>
 
 #include <BRepCheck_Analyzer.hxx>
@@ -178,6 +179,47 @@ RepairDiagnostics::FailureList RepairDiagnostics::FindNewBRepCheckFailures(
         }
     }
     return newFailures;
+}
+
+RepairDiagnostics::FailureList RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+    const FailureList& existingFailures,
+    const FailureList& resultFailures)
+{
+    using FailureKey = std::pair<int, int>;
+    std::map<FailureKey, int> remainingExistingCounts;
+    for (const BRepCheckFailureInfo& failure : existingFailures) {
+        for (const BRepCheck_Status status : failure.statuses) {
+            ++remainingExistingCounts[FailureKey(
+                static_cast<int>(failure.type),
+                static_cast<int>(status))];
+        }
+    }
+
+    FailureList increasedFailures;
+    for (const BRepCheckFailureInfo& failure : resultFailures) {
+        BRepCheckFailureInfo increasedFailure;
+        increasedFailure.shape = failure.shape;
+        increasedFailure.type = failure.type;
+
+        for (const BRepCheck_Status status : failure.statuses) {
+            const FailureKey key(
+                static_cast<int>(failure.type),
+                static_cast<int>(status));
+            auto existingIt = remainingExistingCounts.find(key);
+            if (existingIt != remainingExistingCounts.end() && existingIt->second > 0) {
+                --existingIt->second;
+            }
+            else {
+                increasedFailure.statuses.push_back(status);
+            }
+        }
+
+        if (!increasedFailure.statuses.empty()) {
+            increasedFailures.push_back(increasedFailure);
+        }
+    }
+
+    return increasedFailures;
 }
 
 std::string RepairDiagnostics::DescribeBRepCheckFailures(

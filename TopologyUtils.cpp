@@ -28,6 +28,19 @@ void TopologyUtils::BuildEdgeFaceMap(const TopoDS_Shape& shape, TopTools_Indexed
     RemoveDuplicateAncestors(map);
 }
 
+void TopologyUtils::BuildFaceShellMap(
+    const TopoDS_Shape& shape,
+    TopTools_IndexedDataMapOfShapeListOfShape& map)
+{
+    map.Clear();
+    if (shape.IsNull()) {
+        return;
+    }
+
+    TopExp::MapShapesAndAncestors(shape, TopAbs_FACE, TopAbs_SHELL, map);
+    RemoveDuplicateAncestors(map);
+}
+
 int TopologyUtils::GetVertexDegree(const TopoDS_Vertex& vertex, const TopTools_IndexedDataMapOfShapeListOfShape& map)
 {
     if (map.Contains(vertex)) {

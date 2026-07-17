@@ -2,6 +2,7 @@
 
 #include "HealClosedNarrowGap.h"
 #include "HealNarrowGap.h"
+#include "HealSimpleHole.h"
 #include "ShapeRepairPipeline.h"
 
 // 将当前已有修复类适配为通用流水线阶段。
@@ -14,5 +15,9 @@ namespace ShapeRepairStages
 
     ShapeRepairPipeline::Stage MakeHealClosedNarrowGapStage(
         const HealClosedNarrowGap::Params& params = HealClosedNarrowGap::Params(),
+        bool enabled = true);
+
+    ShapeRepairPipeline::Stage MakeHealSimpleHoleStage(
+        const HealSimpleHole::Params& params = HealSimpleHole::Params(),
         bool enabled = true);
 }

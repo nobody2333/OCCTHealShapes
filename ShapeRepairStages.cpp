@@ -37,3 +37,22 @@ ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealClosedNarrowGapStage(
     };
     return stage;
 }
+
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealSimpleHoleStage(
+    const HealSimpleHole::Params& params,
+    bool enabled)
+{
+    ShapeRepairPipeline::Stage stage;
+    stage.name = "HealSimpleHole";
+    stage.enabled = enabled;
+    stage.execute = [params](const TopoDS_Shape& inputShape) {
+        HealSimpleHole healer(params);
+        ShapeRepairPipeline::StageExecutionResult result;
+        result.repairCount = healer.perform(inputShape);
+        result.resultShape = healer.getResultShape();
+        result.modified = healer.isModified();
+        result.messages = healer.getMessages();
+        return result;
+    };
+    return stage;
+}

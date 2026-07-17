@@ -45,6 +45,11 @@ public:
         const FailureList& existingFailures,
         const FailureList& resultFailures);
 
+    // 按 shape 类型和状态的出现次数比较错误，适用于修复后 TShape 身份发生变化的场景。
+    static FailureList FindBRepCheckFailureCountIncrease(
+        const FailureList& existingFailures,
+        const FailureList& resultFailures);
+
     // 输出已收集错误的简洁说明。
     static std::string DescribeBRepCheckFailures(
         const FailureList& failures,

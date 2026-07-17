@@ -218,6 +218,72 @@ int healClosedGap(const std::string& fileName) {
     return repairedCount;
 }
 
+// 单独运行简单孔洞修复；容器遍历和 STEP 导出复用通用流水线入口。
+int healSimpleHole(const std::string& fileName) {
+    const std::string inputFilePath = "./assets/" + fileName + ".stp";
+    const std::filesystem::path outputDirectory = "./assets/fixedSimpleHole";
+    std::filesystem::create_directories(outputDirectory);
+    const std::string outputFilePath =
+        (outputDirectory / ("HealSimpleHole_" + fileName + ".stp")).string();
+
+    ApplicationInit appInit;
+    const auto startTime = std::chrono::system_clock::now();
+    if (!appInit.importStep(inputFilePath)) {
+        std::cerr << "Reading file failed: " << inputFilePath << std::endl;
+        return -1;
+    }
+
+    const std::vector<TopoDS_Shape> inputShapes = appInit.getAllShapes();
+    if (inputShapes.empty()) {
+        std::cerr << "Cannot find valid shapes!" << std::endl;
+        return -1;
+    }
+    for (std::size_t i = 0; i < inputShapes.size(); ++i) {
+        std::cout << std::format(
+            "Shape[{}] type: {}",
+            i,
+            static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
+    }
+
+    HealSimpleHole::Params holeParams;
+    // 自动补孔无法仅凭拓扑区分设计开口，使用前应按模型单位调整这些范围。
+    holeParams.minBoundaryDiameter = 1.0e-1;
+    holeParams.maxBoundaryDiameter = 1.0e1;
+    holeParams.fillingPointsOnCurve = 15;
+    holeParams.fillingIterations = 2;
+    holeParams.fillingMaxDegree = 6;
+    holeParams.fillingMaxSegments = 16;
+    holeParams.tryHighComplexityC0Fallback = true;
+    holeParams.fallbackFillingMaxDegree = 7;
+    holeParams.fallbackFillingMaxSegments = 100;
+    // 当前模型其余同类孔洞的 C0 filling G0Error 约为 0.014~0.016。
+    holeParams.maxFillingG0Error = 2.0e-2;
+    holeParams.maxRebuiltBoundaryDeviation = 4.0e-2;
+
+    ShapeRepairPipeline pipeline;
+    pipeline.addStage(
+        ShapeRepairStages::MakeHealSimpleHoleStage(holeParams));
+
+    std::cout << "Healing simple holes......" << std::endl;
+    const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
+        outputFilePath,
+        pipeline);
+    if (repairedCount < 0) {
+        std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
+        return -1;
+    }
+
+    std::cout << "Repaired simple-hole candidate count: "
+              << repairedCount << std::endl;
+    std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
+
+    const auto endTime = std::chrono::system_clock::now();
+    std::cout << "Total cost: "
+              << std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count()
+              << " s" << std::endl;
+    return repairedCount;
+}
+
 int mergeDuplicateVertex(const std::string& fileName) {
     std::string inputFilePath = "./assets/" + fileName + ".stp";
     std::filesystem::create_directories("./assets/fixedDuplicateVertex");
@@ -413,6 +479,8 @@ int runShapeRepairPipeline(const std::string& fileName) {
     // 调整这些开关即可指定参与本次修复的模块。
     const bool enableHealNarrowGap = true;
     const bool enableHealClosedNarrowGap = true;
+    // 自动补孔需要结合模型单位设置尺寸范围，默认不启用。
+    const bool enableHealSimpleHole = true;
 
     ShapeRepairPipeline::Params pipelineParams;
     pipelineParams.rejectShapeTypeChange = true;
@@ -422,8 +490,25 @@ int runShapeRepairPipeline(const std::string& fileName) {
 
     HealNarrowGap::Params narrowGapParams;
     HealClosedNarrowGap::Params closedNarrowGapParams;
+    HealSimpleHole::Params simpleHoleParams;
 
-    // 添加顺序就是执行顺序：先处理同端点双边细缝，再处理闭合多段细缝。
+    // 与单独运行 HealSimpleHole 时使用相同的已验证参数。
+    simpleHoleParams.minBoundaryDiameter = 1.0e-1;
+    simpleHoleParams.maxBoundaryDiameter = 1.0e1;
+    simpleHoleParams.fillingPointsOnCurve = 15;
+    simpleHoleParams.fillingIterations = 2;
+    simpleHoleParams.fillingMaxDegree = 6;
+    simpleHoleParams.fillingMaxSegments = 16;
+    simpleHoleParams.tryHighComplexityC0Fallback = true;
+    simpleHoleParams.fallbackFillingMaxDegree = 7;
+    simpleHoleParams.fallbackFillingMaxSegments = 100;
+    simpleHoleParams.maxFillingG0Error = 2.0e-2;
+    simpleHoleParams.maxRebuiltBoundaryDeviation = 4.0e-2;
+
+    // 添加顺序就是执行顺序：先补孔，避免细缝修复改变孔洞自由边界的拓扑关系。
+    pipeline.addStage(ShapeRepairStages::MakeHealSimpleHoleStage(
+        simpleHoleParams,
+        enableHealSimpleHole));
     pipeline.addStage(ShapeRepairStages::MakeHealNarrowGapStage(
         narrowGapParams,
         enableHealNarrowGap));
@@ -458,11 +543,8 @@ int main()
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);
     //healClosedGap(fileName);
-    //mergeDuplicateVertex(fileName);
-    //mergeDuplicateVertexOnStepShape(fileName);
-    //sewShellsOnStepShape(fileName);
-    //mergeDuplicateVertexAndHealNarrowGap(fileName);
-	//sewShellsOnStepShape("h6k");
+    //healSimpleHole(fileName);
+	//sewShellsOnStepShape(filename);
 	runShapeRepairPipeline(fileName);
     return 0;
 }
