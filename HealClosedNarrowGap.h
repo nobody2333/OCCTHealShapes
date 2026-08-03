@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,13 @@ class BRepTools_ReShape;
 // 第一版识别由单面边界 edge 组成的闭合 loop，并优先尝试用中线 edge chain 收缩两侧边界。
 class HealClosedNarrowGap {
 public:
+    // 指定中线 edge chain 的构造方式；Auto 保持原有自动分派行为。
+    enum class MidlineConstructionMode {
+        Auto,
+        LegacyOneToOne,
+        ProjectionCorrespondence
+    };
+
     struct Params {
         // 两侧 chain 采样点之间允许的最大宽度。
         double maxGapWidth = 1.0e-1;
@@ -25,7 +33,17 @@ public:
         double minLengthWidthRatio = 5.0;
         // 识别细缝端部尖点时允许的最大夹角。
         double maxTipAngle = 35.0 * 3.14159265358979323846 / 180.0;
-        // 对两侧 chain 做同步采样的点数。
+        // 关闭宽度自适应采样或参数无效时，每侧使用的固定宽度采样点数。
+        int widthSampleCount = 20;
+        // 是否根据两侧 chain 的较长长度自适应计算宽度检测采样点数。
+        bool useAdaptiveWidthSampleCount = true;
+        // 宽度检测的最小采样点数；默认不低于旧版固定采样密度。
+        int minWidthSampleCount = 20;
+        // 宽度检测的最大采样点数，限制双向投影的性能开销。
+        int maxWidthSampleCount = 120;
+        // 宽度检测的目标采样间距，单位与模型单位一致。
+        double targetWidthSampleSpacing = 0.5;
+        // 关闭中线自适应采样或参数无效时，中线曲线拟合使用的固定采样点数。
         int sampleCount = 20;
         // 是否根据每对 source edge 的长度自适应计算中线曲线采样点数。
         bool useAdaptiveSampleCount = true;
@@ -37,6 +55,11 @@ public:
         double targetSampleSpacing = 1.0;
         // 为 true 时，优先用两侧采样点中线构造新 edge chain，同时替换两侧 chain。
         bool useMidlineCollapse = true;
+        // 中线构造模式；投影对应模式也可以显式用于拓扑分段对称的候选。
+        MidlineConstructionMode midlineConstructionMode =
+            MidlineConstructionMode::Auto;
+        // 投影点靠近对侧已有顶点时，允许吸附成真实顶点配对的几何容差。
+        double projectionVertexSnapTolerance = 1.0e-4;
         // 中线收缩失败时，是否回退到“一侧 chain 替换另一侧 chain”的保守方案。
         bool fallbackToSideReplacement = true;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
@@ -96,6 +119,9 @@ private:
         std::vector<TopoDS_Vertex> tipVertices;
         double meanWidth = 0.0;
         double maxWidth = 0.0;
+        double maxWidthAToB = 0.0;
+        double maxWidthBToA = 0.0;
+        int usedWidthSampleCount = 0;
         double lengthRatio = 0.0;
         double lengthWidthRatio = 0.0;
         double endpointSharpness = 0.0;
@@ -107,11 +133,69 @@ private:
         EdgeChain replaceChain;
     };
 
+    // 保存一侧 chain 按真实 edge 弧长计算的归一化顶点站点。
+    struct ChainStationData {
+        std::vector<double> edgeLengths;
+        std::vector<double> vertexStations;
+        double totalLength = 0.0;
+    };
+
+    // 一个源点投影到整条目标 chain 后的最近解及吸附信息。
+    struct ChainProjectionResult {
+        gp_Pnt projectedPoint;
+        gp_Pnt rawProjectedPoint;
+        std::size_t targetEdgeIndex =
+            std::numeric_limits<std::size_t>::max();
+        double targetParameter = 0.0;
+        double targetStation = 0.0;
+        double rawTargetStation = 0.0;
+        double distance = 0.0;
+        double rawDistance = 0.0;
+        std::size_t snappedTargetVertexIndex =
+            std::numeric_limits<std::size_t>::max();
+        bool snappedToVertex = false;
+    };
+
+    // 表示 chainA(stationA) 与 chainB(stationB) 的一个单调对应节点。
+    struct ProjectionCorrespondenceNode {
+        double stationA = 0.0;
+        double stationB = 0.0;
+        gp_Pnt pointA;
+        gp_Pnt pointB;
+        std::size_t sourceVertexIndexA =
+            std::numeric_limits<std::size_t>::max();
+        std::size_t sourceVertexIndexB =
+            std::numeric_limits<std::size_t>::max();
+        double projectionDistance = 0.0;
+        bool hasSourceVertexA = false;
+        bool hasSourceVertexB = false;
+        bool snappedPair = false;
+        // 该节点是否由目标短边检查合并得到；它与投影吸附配对是两种不同机制。
+        bool mergedForShortEdge = false;
+        bool endpoint = false;
+    };
+
+    // 双向投影中经过确定性冲突消解后保留的一对真实顶点。
+    struct SnappedVertexPair {
+        std::size_t sourceVertexIndexA =
+            std::numeric_limits<std::size_t>::max();
+        std::size_t sourceVertexIndexB =
+            std::numeric_limits<std::size_t>::max();
+        double distance = 0.0;
+    };
+
     // 中线构造结果；映射中保存规范中线 edge 的索引，避免各 face 持有不同副本。
     struct MidlineChainData {
         EdgeChain chain;
         std::vector<std::vector<std::size_t>> replacementsForChainA;
         std::vector<std::vector<std::size_t>> replacementsForChainB;
+        // A、B 两侧源顶点数量可能不同，必须分别映射到统一目标顶点。
+        std::vector<std::size_t> targetVertexIndicesForChainA;
+        std::vector<std::size_t> targetVertexIndicesForChainB;
+        std::vector<ProjectionCorrespondenceNode> correspondenceNodes;
+        int shortEdgeMergeCount = 0;
+        MidlineConstructionMode constructionMode =
+            MidlineConstructionMode::LegacyOneToOne;
     };
 
     // 一个 face 内单条原 edge 的中线替换任务，替换边通过规范中线索引引用。
@@ -156,10 +240,123 @@ private:
 
     ChainChoice chooseChainToKeep(const ClosedGapCandidate& candidate) const;
     bool sampleChainPoint(const EdgeChain& chain, double normalized, gp_Pnt& point) const;
+
+    // 在整条实际裁剪 chain 上查找离 sourcePoint 最近的点。
+    bool findNearestPointOnChain(
+        const gp_Pnt& sourcePoint,
+        const EdgeChain& targetChain,
+        std::size_t& targetEdgeIndex,
+        double& targetParameter,
+        gp_Pnt& targetPoint,
+        double& distance,
+        std::string& errorMessage) const;
+
+    // 两侧分别采样并投影到对侧 chain，计算离散双向最近距离。
+    bool evaluateBidirectionalGap(
+        const EdgeChain& chainA,
+        const EdgeChain& chainB,
+        double& maxWidthAToB,
+        double& maxWidthBToA,
+        double& meanWidth,
+        int& usedSampleCount,
+        std::string& errorMessage) const;
+
     bool buildMidlineChain(
         const ClosedGapCandidate& candidate,
         MidlineChainData& midlineData,
         std::string& errorMessage) const;
+
+    bool canUseLegacyOneToOnePath(
+        const ClosedGapCandidate& candidate) const;
+
+    bool resolveMidlineConstructionMode(
+        const ClosedGapCandidate& candidate,
+        MidlineConstructionMode& mode,
+        std::string& errorMessage) const;
+
+    bool buildMidlineChainOneToOne(
+        const ClosedGapCandidate& candidate,
+        MidlineChainData& midlineData,
+        std::string& errorMessage) const;
+
+    bool buildMidlineChainByProjectionCorrespondence(
+        const ClosedGapCandidate& candidate,
+        MidlineChainData& midlineData,
+        std::string& errorMessage) const;
+
+    bool buildNormalizedVertexStations(
+        const EdgeChain& chain,
+        const char* chainName,
+        ChainStationData& stationData,
+        std::string& errorMessage) const;
+
+    bool projectPointToChain(
+        const gp_Pnt& sourcePoint,
+        const EdgeChain& targetChain,
+        const ChainStationData& targetStationData,
+        ChainProjectionResult& projection,
+        std::string& errorMessage) const;
+
+    bool selectSnappedVertexPairs(
+        const EdgeChain& chainA,
+        const EdgeChain& chainB,
+        const std::vector<ChainProjectionResult>& projectionsFromA,
+        const std::vector<ChainProjectionResult>& projectionsFromB,
+        std::vector<SnappedVertexPair>& selectedPairs,
+        std::string& errorMessage) const;
+
+    bool buildProjectionCorrespondenceNodes(
+        const ClosedGapCandidate& candidate,
+        const ChainStationData& chainAStations,
+        const ChainStationData& chainBStations,
+        std::vector<ProjectionCorrespondenceNode>& nodes,
+        std::string& errorMessage) const;
+
+    bool mergeProjectionCorrespondenceNodes(
+        std::vector<ProjectionCorrespondenceNode>& nodes,
+        const EdgeChain& chainA,
+        const EdgeChain& chainB,
+        const ChainStationData& chainAStations,
+        const ChainStationData& chainBStations,
+        std::string& errorMessage) const;
+
+    bool buildProjectionTargetVertices(
+        const ClosedGapCandidate& candidate,
+        const std::vector<ProjectionCorrespondenceNode>& nodes,
+        MidlineChainData& midlineData,
+        std::string& errorMessage) const;
+
+    bool buildProjectionTargetEdges(
+        const ClosedGapCandidate& candidate,
+        const ChainStationData& chainAStations,
+        const ChainStationData& chainBStations,
+        const std::vector<ProjectionCorrespondenceNode>& nodes,
+        MidlineChainData& midlineData,
+        std::string& errorMessage) const;
+
+    // 根据已生成目标 edge 的实际长度和端点容差，合并可能在后续修复中退化的相邻节点。
+    bool mergeProjectionNodesForShortTargetEdges(
+        std::vector<ProjectionCorrespondenceNode>& nodes,
+        const MidlineChainData& midlineData,
+        bool& nodesMerged,
+        std::string& errorMessage) const;
+
+    bool buildSourceToTargetEdgeMapping(
+        const std::vector<double>& sourceVertexStations,
+        const std::vector<double>& targetStations,
+        const char* chainName,
+        std::vector<std::vector<std::size_t>>& mapping,
+        std::string& errorMessage) const;
+
+    bool validateReplacementMapping(
+        const std::vector<std::vector<std::size_t>>& mapping,
+        std::size_t sourceEdgeCount,
+        std::size_t targetEdgeCount,
+        const char* chainName,
+        std::string& errorMessage) const;
+
+    static const char* midlineConstructionModeName(
+        MidlineConstructionMode mode);
 
     bool rebuildFacesByCollapsingToMidline(
         const TopoDS_Shape& currentShape,
@@ -200,9 +397,14 @@ private:
         std::string& errorMessage) const;
 
     int computeAutomaticIterationLimit(const TopoDS_Shape& shape) const;
-    // 根据一对 source edge 的长度计算中线曲线拟合点数。
+    // 根据两侧 chain 长度计算宽度检测采样数；关闭自适应时返回 widthSampleCount。
+    int computeWidthSampleCount(double lengthA, double lengthB) const;
     int computeMidlineSampleCount(double lengthA, double lengthB) const;
     int findSameEdgeIndex(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge) const;
-    bool ensurePCurveOnFace(TopoDS_Edge& edge, const TopoDS_Face& face, double tolerance, std::string& errorMessage) const;
+    bool ensurePCurveOnFace(
+        TopoDS_Edge& edge,
+        const TopoDS_Face& face,
+        double tolerance,
+        std::string& errorMessage) const;
     void appendMessage(const std::string& message);
 };

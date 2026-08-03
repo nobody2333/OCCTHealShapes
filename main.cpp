@@ -199,7 +199,7 @@ int healClosedGap(const std::string& fileName) {
     }
 
     HealClosedNarrowGap::Params params;
-
+	params.midlineConstructionMode = HealClosedNarrowGap::MidlineConstructionMode::ProjectionCorrespondence;
     std::cout << "Healing closed narrow gaps......" << std::endl;
     const int repairedCount = appInit.healClosedGapsOnLowestContainersAndExport(outputFilePath, params);
     if (repairedCount < 0) {
@@ -480,7 +480,7 @@ int runShapeRepairPipeline(const std::string& fileName) {
     const bool enableHealNarrowGap = true;
     const bool enableHealClosedNarrowGap = true;
     // 自动补孔需要结合模型单位设置尺寸范围，默认不启用。
-    const bool enableHealSimpleHole = true;
+    const bool enableHealSimpleHole = false;
 
     ShapeRepairPipeline::Params pipelineParams;
     pipelineParams.rejectShapeTypeChange = true;
@@ -504,6 +504,8 @@ int runShapeRepairPipeline(const std::string& fileName) {
     simpleHoleParams.fallbackFillingMaxSegments = 100;
     simpleHoleParams.maxFillingG0Error = 2.0e-2;
     simpleHoleParams.maxRebuiltBoundaryDeviation = 4.0e-2;
+
+	closedNarrowGapParams.midlineConstructionMode = HealClosedNarrowGap::MidlineConstructionMode::ProjectionCorrespondence;
 
     // 添加顺序就是执行顺序：先补孔，避免细缝修复改变孔洞自由边界的拓扑关系。
     pipeline.addStage(ShapeRepairStages::MakeHealSimpleHoleStage(
