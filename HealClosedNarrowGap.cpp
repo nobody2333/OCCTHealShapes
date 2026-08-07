@@ -738,6 +738,20 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
             candidate.endpointScore =
                 0.5 * (startEnd.score + finishEnd.score);
 
+            // 长度比只依赖已计算的 chain 长度，先做廉价过滤，避免无效组合进入双向投影。
+            const double longerChainLength = std::max(chainA.length, chainB.length);
+            if (!std::isfinite(longerChainLength) ||
+                longerChainLength <= Precision::Confusion()) {
+                return;
+            }
+            candidate.lengthRatio =
+                std::min(chainA.length, chainB.length) / longerChainLength;
+            if (!std::isfinite(candidate.lengthRatio) ||
+                candidate.lengthRatio + Precision::Confusion() <
+                    params_.minLengthRatio) {
+                return;
+            }
+
             auto endpointPoint = [](const GapEnd& end, gp_Pnt& point) {
                 if (end.vertexA.IsNull() || end.vertexB.IsNull()) {
                     return false;
@@ -783,9 +797,6 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
             candidate.maxWidth = std::max(
                 candidate.maxWidthAToB,
                 candidate.maxWidthBToA);
-            candidate.lengthRatio =
-                std::min(chainA.length, chainB.length) /
-                std::max(chainA.length, chainB.length);
             candidate.lengthWidthRatio =
                 0.5 * (chainA.length + chainB.length) /
                 std::max(candidate.meanWidth, Precision::Confusion());
@@ -816,8 +827,6 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
                 finishEnd.type == GapEndType::ShortEdge;
 
             if (candidate.maxWidth > params_.maxGapWidth ||
-                candidate.lengthRatio + Precision::Confusion() <
-                    params_.minLengthRatio ||
                 candidate.lengthWidthRatio + Precision::Confusion() <
                     params_.minLengthWidthRatio ||
                 (hasShortEdgeEnd &&
@@ -1218,6 +1227,15 @@ bool HealClosedNarrowGap::evaluateBidirectionalGap(
                         projectionError)) {
                     errorMessage = "bidirectional gap evaluation failure: "
                         + projectionError;
+                    return false;
+                }
+
+                // 最大宽度取所有双向采样距离的最大值；任一点超限后，后续采样不可能使候选重新合格。
+                if (nearestDistance > params_.maxGapWidth) {
+                    errorMessage = std::string(
+                        "bidirectional gap evaluation rejected: ")
+                        + directionName
+                        + " sample distance exceeds maxGapWidth";
                     return false;
                 }
 
