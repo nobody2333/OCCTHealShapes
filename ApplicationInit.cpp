@@ -1,8 +1,8 @@
 #include "ApplicationInit.h"
 
 #include <cctype>
+#include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <IGESCAFControl_Reader.hxx>
@@ -26,10 +26,64 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include "Logger.h"
 #include "TopologyUtils.h"
-#include "RepairDiagnostics.h"
 
 namespace {
+    using RepairClock = std::chrono::steady_clock;
+
+    // Logger 接收一段扁平的字段字符串。统一通过 Logger 的字段辅助函数构造，
+    // 确保所有文本都使用相同的引号和转义规则。
+    std::string logFields(std::initializer_list<std::string> fields)
+    {
+        std::string result;
+        for (const std::string& field : fields) {
+            result = Logger::appendField(result, field);
+        }
+        return result;
+    }
+
+    long long elapsedMilliseconds(const RepairClock::time_point& start)
+    {
+        // steady_clock 不受系统时间校准影响，适合计算耗时较长的几何任务时长。
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            RepairClock::now() - start).count();
+    }
+
+    void reportLogOpenFailure(const Logger& logger)
+    {
+        // 日志打开失败不能影响修复任务本身；几何修复继续执行，同时在控制台
+        // 明确报告日志文件不可用。
+        if (!logger.isOpen()) {
+            std::cerr << "Warning: Cannot open repair log file: "
+                      << logger.filePath().string() << std::endl;
+        }
+    }
+
+    std::string shapeTypeField(const TopoDS_Shape& shape)
+    {
+        return Logger::textField("shape_type", TopologyUtils::ShapeTypeName(shape));
+    }
+
+    void logRunFailure(
+        Logger& logger,
+        const RepairClock::time_point& start,
+        const std::string& stage,
+        const std::string& reason)
+    {
+        // 所有提前返回路径都通过同一函数写 Run 失败汇总，避免日志只有
+        // event=run phase=start，却没有与之对应的 phase=end。
+        logger.run(
+            Logger::Level::Error,
+            "end",
+            logFields({
+                Logger::textField("status", "failed"),
+                Logger::textField("stage", stage),
+                Logger::textField("reason", reason),
+                Logger::integerField("duration_ms", elapsedMilliseconds(start))
+            }));
+    }
+
     std::string labelEntryString(const TDF_Label& label)
     {
         if (label.IsNull()) {
@@ -394,57 +448,52 @@ int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
     const std::string& filePath,
     const MergeDuplicateVertex::Params& params)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path mergeLogPath =
         std::filesystem::path("assets") / "fixedDuplicateVertexStepShape" / "MergeDuplicateVertexStepShapeLog.txt";
-    std::filesystem::create_directories(mergeLogPath.parent_path());
-    {
-        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "MergeDuplicateVertex STEP shape log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open MergeDuplicateVertex STEP shape log file: "
-                      << mergeLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(mergeLogPath, "MergeDuplicateVertex");
+    reportLogOpenFailure(logger);
+    logger.run(
+        Logger::Level::Info,
+        "start",
+        logFields({
+            Logger::textField("input_scope", "step_shape"),
+            Logger::pathField("output_step", filePath),
+            Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+        }));
 
     if (importedStepShape_.IsNull()) {
         std::cerr << "Error: Cannot merge duplicate vertices because imported STEP shape is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "imported STEP shape is null");
         return 0;
     }
+
+    const RepairClock::time_point containerStart = RepairClock::now();
+    logger.container(
+        Logger::Level::Info,
+        0,
+        "start",
+        logFields({shapeTypeField(importedStepShape_), Logger::textField("scope", "step_shape")}));
 
     MergeDuplicateVertex duplicateVertexMerger(params);
     duplicateVertexMerger.setInputShape(importedStepShape_);
     const int mergedCount = duplicateVertexMerger.perform();
-
-    {
-        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
-        if (logFile) {
-            logFile << "[MergeDuplicateVertex][StepShape]"
-                    << " mergedCount=" << mergedCount
-                    << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
-                    << ", inputShapeType=" << static_cast<int>(importedStepShape_.ShapeType())
-                    << std::endl;
-
-            const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
-            if (messages.empty()) {
-                logFile << "  (no messages)" << std::endl;
-            }
-            for (const std::string& message : messages) {
-                logFile << "  - " << message << std::endl;
-            }
-            logFile << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot append MergeDuplicateVertex STEP shape log file: "
-                      << mergeLogPath.string() << std::endl;
-        }
-    }
+    logger.containerMessages(0, "MergeDuplicateVertex", duplicateVertexMerger.getMessages());
 
     TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
     if (processedShape.IsNull()) {
         std::cerr << "Error: MergeDuplicateVertex produced a null STEP shape result." << std::endl;
+        logger.container(
+            Logger::Level::Error,
+            0,
+            "end",
+            logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
+        logRunFailure(logger, runStart, "result_validate", "result shape is null");
         return 0;
     }
 
@@ -452,14 +501,51 @@ int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
         std::cerr << "Error: MergeDuplicateVertex changed STEP shape type from "
                   << static_cast<int>(importedStepShape_.ShapeType()) << " to "
                   << static_cast<int>(processedShape.ShapeType()) << "." << std::endl;
+        logger.container(
+            Logger::Level::Error,
+            0,
+            "end",
+            logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
+        logRunFailure(logger, runStart, "result_validate", "result shape type changed");
         return 0;
     }
 
     importedStepShape_ = processedShape;
 
+    logger.container(
+        Logger::Level::Info,
+        0,
+        "end",
+        logFields({
+            Logger::textField(
+                "status",
+                duplicateVertexMerger.isModified() ? "success" : "no_change"),
+            Logger::boolField("modified", duplicateVertexMerger.isModified()),
+            Logger::integerField("repair_count", mergedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
+
     if (!exportStepShape(importedStepShape_, filePath)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP shape");
         return -1;
     }
+
+    logger.run(
+        Logger::Level::Info,
+        "end",
+        logFields({
+            Logger::textField("status", "success"),
+            Logger::integerField("container_count", 1),
+            Logger::integerField("modified_containers", duplicateVertexMerger.isModified() ? 1 : 0),
+            Logger::integerField("repair_count", mergedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+        }));
 
     return mergedCount;
 }
@@ -468,57 +554,52 @@ int ApplicationInit::sewShellsOnStepShapeAndExport(
     const std::string& filePath,
     const SewShells::Params& params)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path sewLogPath =
         std::filesystem::path("assets") / "fixedSewShellsStepShape" / "SewShellsStepShapeLog.txt";
-    std::filesystem::create_directories(sewLogPath.parent_path());
-    {
-        std::ofstream logFile(sewLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "SewShells STEP shape log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open SewShells STEP shape log file: "
-                      << sewLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(sewLogPath, "SewShells");
+    reportLogOpenFailure(logger);
+    logger.run(
+        Logger::Level::Info,
+        "start",
+        logFields({
+            Logger::textField("input_scope", "step_shape"),
+            Logger::pathField("output_step", filePath),
+            Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+        }));
 
     if (importedStepShape_.IsNull()) {
         std::cerr << "Error: Cannot sew shells because imported STEP shape is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "imported STEP shape is null");
         return 0;
     }
+
+    const RepairClock::time_point containerStart = RepairClock::now();
+    logger.container(
+        Logger::Level::Info,
+        0,
+        "start",
+        logFields({shapeTypeField(importedStepShape_), Logger::textField("scope", "step_shape")}));
 
     SewShells shellSewer(params);
     shellSewer.setInputShape(importedStepShape_);
     const int sewedGroupCount = shellSewer.perform();
-
-    {
-        std::ofstream logFile(sewLogPath, std::ios::out | std::ios::app);
-        if (logFile) {
-            logFile << "[SewShells][StepShape]"
-                    << " sewedGroupCount=" << sewedGroupCount
-                    << ", modified=" << (shellSewer.isModified() ? "true" : "false")
-                    << ", inputShapeType=" << TopologyUtils::ShapeTypeName(importedStepShape_)
-                    << std::endl;
-
-            const std::vector<std::string>& messages = shellSewer.getMessages();
-            if (messages.empty()) {
-                logFile << "  (no messages)" << std::endl;
-            }
-            for (const std::string& message : messages) {
-                logFile << "  - " << message << std::endl;
-            }
-            logFile << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot append SewShells STEP shape log file: "
-                      << sewLogPath.string() << std::endl;
-        }
-    }
+    logger.containerMessages(0, "SewShells", shellSewer.getMessages());
 
     TopoDS_Shape processedShape = shellSewer.getResultShape();
     if (processedShape.IsNull()) {
         std::cerr << "Error: SewShells produced a null STEP shape result." << std::endl;
+        logger.container(
+            Logger::Level::Error,
+            0,
+            "end",
+            logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
+        logRunFailure(logger, runStart, "result_validate", "result shape is null");
         return 0;
     }
 
@@ -526,14 +607,49 @@ int ApplicationInit::sewShellsOnStepShapeAndExport(
         std::cerr << "Error: SewShells changed STEP shape type from "
                   << TopologyUtils::ShapeTypeName(importedStepShape_) << " to "
                   << TopologyUtils::ShapeTypeName(processedShape) << "." << std::endl;
+        logger.container(
+            Logger::Level::Error,
+            0,
+            "end",
+            logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
+        logRunFailure(logger, runStart, "result_validate", "result shape type changed");
         return 0;
     }
 
     importedStepShape_ = processedShape;
 
+    logger.container(
+        Logger::Level::Info,
+        0,
+        "end",
+        logFields({
+            Logger::textField("status", shellSewer.isModified() ? "success" : "no_change"),
+            Logger::boolField("modified", shellSewer.isModified()),
+            Logger::integerField("repair_count", sewedGroupCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
+
     if (!exportStepShape(importedStepShape_, filePath)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP shape");
         return -1;
     }
+
+    logger.run(
+        Logger::Level::Info,
+        "end",
+        logFields({
+            Logger::textField("status", "success"),
+            Logger::integerField("container_count", 1),
+            Logger::integerField("modified_containers", shellSewer.isModified() ? 1 : 0),
+            Logger::integerField("repair_count", sewedGroupCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+        }));
 
     return sewedGroupCount;
 }
@@ -570,28 +686,37 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
                                                                 double manualLengthThreshold,
                                                                 double angleThresholdDeg)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path mergeLogPath = std::filesystem::path("assets") / "fixedShortEdge" / "MergeShortEdgeLog.txt";
-    std::filesystem::create_directories(mergeLogPath.parent_path());
-    {
-        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "MergeShortEdge log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open MergeShortEdge log file: "
-                      << mergeLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(mergeLogPath, "MergeShortEdge");
+    reportLogOpenFailure(logger);
+    logger.run(
+        Logger::Level::Info,
+        "start",
+        logFields({
+            Logger::pathField("output_step", filePath),
+            Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+        }));
+    logger.run(
+        Logger::Level::Info,
+        "process",
+        logFields({
+            Logger::textField("stage", "config"),
+            Logger::boolField("manual_length_threshold", useManualLengthThreshold),
+            Logger::numberField("length_threshold", manualLengthThreshold),
+            Logger::numberField("angle_threshold_deg", angleThresholdDeg)
+        }));
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot merge short edges because the XCAF document is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -600,15 +725,29 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int mergedCount = 0;
     int replacedCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
     for (std::size_t i = 0; i < targets.size(); ++i) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[i];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            ++skippedCount;
+            logger.container(
+                Logger::Level::Warn,
+                i,
+                "end",
+                logFields({
+                    Logger::textField("status", "skipped"),
+                    Logger::textField("reason", "owner label is null"),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
             continue;
         }
 
@@ -618,8 +757,20 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
         const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
         if (originalShape.IsNull()) {
             std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            ++skippedCount;
+            logger.container(
+                Logger::Level::Warn,
+                i,
+                "end",
+                logFields({
+                    Logger::textField("status", "skipped"),
+                    Logger::textField("reason", "input shape is null"),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
             continue;
         }
+
+        logger.container(Logger::Level::Info, i, "start", shapeTypeField(originalShape));
 
         MergeShortEdge shortEdgeMerger;
         if (useManualLengthThreshold) {
@@ -628,33 +779,23 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
         shortEdgeMerger.setAngleThresholdDeg(angleThresholdDeg);
         shortEdgeMerger.setInputShape(originalShape);
         const int containerMergedCount = shortEdgeMerger.performMerge();
-
-        {
-            std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[MergeShortEdge] Container " << i
-                        << ", mergedCount=" << containerMergedCount
-                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = shortEdgeMerger.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    logFile << "  - " << message << std::endl;
-                }
-                logFile << std::endl;
-            }
-            else {
-                std::cerr << "Warning: Cannot append MergeShortEdge log file: "
-                          << mergeLogPath.string() << std::endl;
-            }
-        }
+        logger.containerMessages(i, "MergeShortEdge", shortEdgeMerger.getMessages());
 
         TopoDS_Shape processedShape = shortEdgeMerger.getResultShape();
         if (processedShape.IsNull()) {
             std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(
+                Logger::Level::Error,
+                i,
+                "end",
+                logFields({
+                    Logger::textField("status", "failed"),
+                    Logger::boolField("modified", false),
+                    Logger::textField("action", "keep_original"),
+                    Logger::textField("reason", "result shape is null"),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
             continue;
         }
 
@@ -663,6 +804,18 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
                       << static_cast<int>(originalShape.ShapeType()) << " to "
                       << static_cast<int>(processedShape.ShapeType())
                       << ", keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(
+                Logger::Level::Error,
+                i,
+                "end",
+                logFields({
+                    Logger::textField("status", "failed"),
+                    Logger::boolField("modified", false),
+                    Logger::textField("action", "keep_original"),
+                    Logger::textField("reason", "result shape type changed"),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
             continue;
         }
 
@@ -672,14 +825,38 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
         shapeTool->SetShape(target.ownerLabel, processedShape);
         mergedCount += containerMergedCount;
         ++replacedCount;
+        logger.container(
+            Logger::Level::Info,
+            i,
+            "end",
+            logFields({
+                Logger::textField("status", containerMergedCount > 0 ? "success" : "no_change"),
+                Logger::boolField("modified", containerMergedCount > 0),
+                Logger::integerField("repair_count", containerMergedCount),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
     }
 
     shapeTool->UpdateAssemblies();
     refreshShapeCache();
     std::cout << "Replaced lowest containers after short-edge merge: " << replacedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(
+        failedCount > 0 ? Logger::Level::Warn : Logger::Level::Info,
+        "end",
+        logFields({
+            Logger::textField("status", failedCount > 0 ? "partial_success" : "success"),
+            Logger::integerField("container_count", static_cast<long long>(targets.size())),
+            Logger::integerField("modified_containers", replacedCount),
+            Logger::integerField("skipped_containers", skippedCount),
+            Logger::integerField("failed_containers", failedCount),
+            Logger::integerField("repair_count", mergedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+        }));
 
     return mergedCount;
 }
@@ -688,29 +865,29 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
     const std::string& filePath,
     const MergeDuplicateVertex::Params& params)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path mergeLogPath =
         std::filesystem::path("assets") / "fixedDuplicateVertex" / "MergeDuplicateVertexLog.txt";
-    std::filesystem::create_directories(mergeLogPath.parent_path());
-    {
-        std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "MergeDuplicateVertex log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open MergeDuplicateVertex log file: "
-                      << mergeLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(mergeLogPath, "MergeDuplicateVertex");
+    reportLogOpenFailure(logger);
+    logger.run(
+        Logger::Level::Info,
+        "start",
+        logFields({
+            Logger::pathField("output_step", filePath),
+            Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+        }));
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot merge duplicate vertices because the XCAF document is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -718,15 +895,25 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int mergedCount = 0;
     int replacedCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
     for (std::size_t i = 0; i < targets.size(); ++i) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[i];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "owner label is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -734,40 +921,33 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
         const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
         if (originalShape.IsNull()) {
             std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "input shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
+
+        logger.container(Logger::Level::Info, i, "start", shapeTypeField(originalShape));
 
         MergeDuplicateVertex duplicateVertexMerger(params);
         duplicateVertexMerger.setInputShape(originalShape);
         const int containerMergedCount = duplicateVertexMerger.perform();
-
-        {
-            std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[MergeDuplicateVertex] Container " << i
-                        << ", mergedCount=" << containerMergedCount
-                        << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
-                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    logFile << "  - " << message << std::endl;
-                }
-                logFile << std::endl;
-            }
-            else {
-                std::cerr << "Warning: Cannot append MergeDuplicateVertex log file: "
-                          << mergeLogPath.string() << std::endl;
-            }
-        }
+        logger.containerMessages(i, "MergeDuplicateVertex", duplicateVertexMerger.getMessages());
 
         TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
         if (processedShape.IsNull()) {
             std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -776,24 +956,58 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
                       << static_cast<int>(originalShape.ShapeType()) << " to "
                       << static_cast<int>(processedShape.ShapeType())
                       << ", keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"),
+                Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         if (!duplicateVertexMerger.isModified()) {
+            logger.container(Logger::Level::Info, i, "end", logFields({
+                Logger::textField("status", "no_change"),
+                Logger::boolField("modified", false),
+                Logger::integerField("repair_count", 0),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         shapeTool->SetShape(target.ownerLabel, processedShape);
         mergedCount += containerMergedCount;
         ++replacedCount;
+        logger.container(Logger::Level::Info, i, "end", logFields({
+            Logger::textField("status", "success"),
+            Logger::boolField("modified", true),
+            Logger::integerField("repair_count", containerMergedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
     }
 
     shapeTool->UpdateAssemblies();
     refreshShapeCache();
     std::cout << "Replaced lowest containers after duplicate-vertex merge: " << replacedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(
+        failedCount > 0 ? Logger::Level::Warn : Logger::Level::Info,
+        "end",
+        logFields({
+            Logger::textField("status", failedCount > 0 ? "partial_success" : "success"),
+            Logger::integerField("container_count", static_cast<long long>(targets.size())),
+            Logger::integerField("modified_containers", replacedCount),
+            Logger::integerField("skipped_containers", skippedCount),
+            Logger::integerField("failed_containers", failedCount),
+            Logger::integerField("repair_count", mergedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+        }));
 
     return mergedCount;
 }
@@ -803,29 +1017,27 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
     const MergeDuplicateVertex::Params& duplicateVertexParams,
     const HealNarrowGap::Params& narrowGapParams)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path chainLogPath =
         std::filesystem::path("assets") / "fixedDuplicateVertexNarrowGap" / "MergeDuplicateVertexHealNarrowGapLog.txt";
-    std::filesystem::create_directories(chainLogPath.parent_path());
-    {
-        std::ofstream logFile(chainLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "MergeDuplicateVertex + HealNarrowGap log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open duplicate-vertex/narrow-gap log file: "
-                      << chainLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(chainLogPath, "MergeDuplicateVertex+HealNarrowGap");
+    reportLogOpenFailure(logger);
+    logger.run(Logger::Level::Info, "start", logFields({
+        Logger::pathField("output_step", filePath),
+        Logger::textField("log_level", Logger::levelName(logger.minimumLevel())),
+        Logger::integerField("configured_stage_count", 2)
+    }));
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot run duplicate-vertex/narrow-gap repair because the XCAF document is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -833,16 +1045,25 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int duplicateMergedCount = 0;
     int narrowGapRepairedCount = 0;
     int replacedCount = 0;
+    int skippedCount = 0;
+    int warningCount = 0;
     for (std::size_t i = 0; i < targets.size(); ++i) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[i];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"), Logger::textField("reason", "owner label is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -850,34 +1071,26 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
         const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
         if (originalShape.IsNull()) {
             std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"), Logger::textField("reason", "input shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
+        logger.container(Logger::Level::Info, i, "start", shapeTypeField(originalShape));
+
         TopoDS_Shape workingShape = originalShape;
         bool containerModified = false;
+        bool containerWarning = false;
 
+        // 每个通过校验的阶段都会推进 workingShape。如果某阶段声称已修改，
+        // 但结果为空或 Shape 类型改变，则保留上一份有效 Shape，让后续阶段继续执行。
         MergeDuplicateVertex duplicateVertexMerger(duplicateVertexParams);
         duplicateVertexMerger.setInputShape(workingShape);
         const int containerDuplicateMergedCount = duplicateVertexMerger.perform();
-
-        {
-            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[MergeDuplicateVertex] Container " << i
-                        << ", mergedCount=" << containerDuplicateMergedCount
-                        << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
-                        << ", inputShapeType=" << static_cast<int>(workingShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = duplicateVertexMerger.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    logFile << "  - " << message << std::endl;
-                }
-            }
-        }
+        logger.containerMessages(i, "MergeDuplicateVertex", duplicateVertexMerger.getMessages());
 
         TopoDS_Shape duplicateProcessedShape = duplicateVertexMerger.getResultShape();
         if (!duplicateProcessedShape.IsNull() &&
@@ -888,44 +1101,20 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
             containerModified = true;
         }
         else if (duplicateVertexMerger.isModified()) {
-            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "  - Warning: duplicate-vertex result is invalid or changed shape type; "
-                        << "HealNarrowGap will use original container shape." << std::endl;
-            }
+            containerWarning = true;
+            logger.container(Logger::Level::Warn, i, "process", logFields({
+                Logger::textField("stage", "validate"),
+                Logger::textField("action", "stage_rejected"),
+                Logger::textField("algorithm", "MergeDuplicateVertex"),
+                Logger::textField("fallback", "use_original_shape"),
+                Logger::textField("reason", "result is null or changed shape type")
+            }));
         }
 
         HealNarrowGap narrowGapHealer(narrowGapParams);
         narrowGapHealer.setInputShape(workingShape);
         const int containerNarrowGapRepairedCount = narrowGapHealer.perform();
-
-        {
-            std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[HealNarrowGap] Container " << i
-                        << ", repairedCount=" << containerNarrowGapRepairedCount
-                        << ", modified=" << (narrowGapHealer.isModified() ? "true" : "false")
-                        << ", inputShapeType=" << static_cast<int>(workingShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = narrowGapHealer.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    if (message.empty()) {
-                        logFile << std::endl;
-                        continue;
-                    }
-                    logFile << "  - " << message << std::endl;
-                }
-                logFile << std::endl;
-            }
-            else {
-                std::cerr << "Warning: Cannot append duplicate-vertex/narrow-gap log file: "
-                          << chainLogPath.string() << std::endl;
-            }
-        }
+        logger.containerMessages(i, "HealNarrowGap", narrowGapHealer.getMessages());
 
         TopoDS_Shape narrowGapProcessedShape = narrowGapHealer.getResultShape();
         if (!narrowGapProcessedShape.IsNull() &&
@@ -938,14 +1127,50 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
         else if (narrowGapHealer.isModified()) {
             std::cerr << "Container " << i
                       << " narrow-gap result is invalid or changed shape type, keep previous shape." << std::endl;
+            containerWarning = true;
+            logger.container(Logger::Level::Warn, i, "process", logFields({
+                Logger::textField("stage", "validate"),
+                Logger::textField("action", "stage_rejected"),
+                Logger::textField("algorithm", "HealNarrowGap"),
+                Logger::textField("fallback", "keep_previous_shape"),
+                Logger::textField("reason", "result is null or changed shape type")
+            }));
         }
 
         if (!containerModified) {
+            if (containerWarning) {
+                ++warningCount;
+            }
+            logger.container(
+                containerWarning ? Logger::Level::Warn : Logger::Level::Info,
+                i,
+                "end",
+                logFields({
+                    Logger::textField("status", containerWarning ? "failed" : "no_change"),
+                    Logger::boolField("modified", false),
+                    Logger::integerField("repair_count", 0),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
             continue;
         }
 
         shapeTool->SetShape(target.ownerLabel, workingShape);
         ++replacedCount;
+        if (containerWarning) {
+            ++warningCount;
+        }
+        logger.container(
+            containerWarning ? Logger::Level::Warn : Logger::Level::Info,
+            i,
+            "end",
+            logFields({
+                Logger::textField("status", containerWarning ? "partial_success" : "success"),
+                Logger::boolField("modified", true),
+                Logger::integerField(
+                    "repair_count",
+                    containerDuplicateMergedCount + containerNarrowGapRepairedCount),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
     }
 
     shapeTool->UpdateAssemblies();
@@ -955,8 +1180,19 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
     std::cout << "Duplicate vertices merged: " << duplicateMergedCount
               << ", narrow gaps repaired: " << narrowGapRepairedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(warningCount > 0 ? Logger::Level::Warn : Logger::Level::Info, "end", logFields({
+        Logger::textField("status", warningCount > 0 ? "partial_success" : "success"),
+        Logger::integerField("container_count", static_cast<long long>(targets.size())),
+        Logger::integerField("modified_containers", replacedCount),
+        Logger::integerField("skipped_containers", skippedCount),
+        Logger::integerField("warning_containers", warningCount),
+        Logger::integerField("repair_count", duplicateMergedCount + narrowGapRepairedCount),
+        Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+    }));
 
     return duplicateMergedCount + narrowGapRepairedCount;
 }
@@ -964,28 +1200,25 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
 int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string& filePath,
                                                                const HealNarrowGap::Params& params)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path healLogPath = std::filesystem::path("assets") / "fixedNarrowGap" / "HealGapsLog.txt";
-    std::filesystem::create_directories(healLogPath.parent_path());
-    {
-        std::ofstream logFile(healLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "HealNarrowGap log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open HealNarrowGap log file: "
-                      << healLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(healLogPath, "HealNarrowGap");
+    reportLogOpenFailure(logger);
+    logger.run(Logger::Level::Info, "start", logFields({
+        Logger::pathField("output_step", filePath),
+        Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+    }));
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot heal narrow gaps because the XCAF document is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -993,15 +1226,25 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int repairedCount = 0;
     int replacedCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
     for (std::size_t i = 0; i < targets.size(); ++i) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[i];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "owner label is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1009,44 +1252,32 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
         const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
         if (originalShape.IsNull()) {
             std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "input shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
+
+        logger.container(Logger::Level::Info, i, "start", shapeTypeField(originalShape));
 
         HealNarrowGap narrowGapHealer(params);
         narrowGapHealer.setInputShape(originalShape);
         const int containerRepairedCount = narrowGapHealer.perform();
-
-        {
-            std::ofstream logFile(healLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[HealNarrowGap] Container " << i
-                        << ", repairedCount=" << containerRepairedCount
-                        << ", modified=" << (narrowGapHealer.isModified() ? "true" : "false")
-					    << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = narrowGapHealer.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    if (message.empty()) {
-                        logFile << std::endl;
-                        continue;
-                    }
-                    logFile << "  - " << message << std::endl;
-                }
-                logFile << std::endl;
-            }
-            else {
-                std::cerr << "Warning: Cannot append HealNarrowGap log file: "
-                          << healLogPath.string() << std::endl;
-            }
-        }
+        logger.containerMessages(i, "HealNarrowGap", narrowGapHealer.getMessages());
 
         TopoDS_Shape processedShape = narrowGapHealer.getResultShape();
         if (processedShape.IsNull()) {
             std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1055,16 +1286,33 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
                       << static_cast<int>(originalShape.ShapeType()) << " to "
                       << static_cast<int>(processedShape.ShapeType())
                       << ", keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         if (!narrowGapHealer.isModified()) {
+            logger.container(Logger::Level::Info, i, "end", logFields({
+                Logger::textField("status", "no_change"), Logger::boolField("modified", false),
+                Logger::integerField("repair_count", 0),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         shapeTool->SetShape(target.ownerLabel, processedShape);
         repairedCount += containerRepairedCount;
         ++replacedCount;
+        logger.container(Logger::Level::Info, i, "end", logFields({
+            Logger::textField("status", "success"), Logger::boolField("modified", true),
+            Logger::integerField("repair_count", containerRepairedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
 
     }
 
@@ -1072,8 +1320,19 @@ int ApplicationInit::healNarrowGapsOnLowestContainersAndExport(const std::string
     refreshShapeCache();
     std::cout << "Replaced lowest containers after narrow-gap heal: " << replacedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(failedCount > 0 ? Logger::Level::Warn : Logger::Level::Info, "end", logFields({
+        Logger::textField("status", failedCount > 0 ? "partial_success" : "success"),
+        Logger::integerField("container_count", static_cast<long long>(targets.size())),
+        Logger::integerField("modified_containers", replacedCount),
+        Logger::integerField("skipped_containers", skippedCount),
+        Logger::integerField("failed_containers", failedCount),
+        Logger::integerField("repair_count", repairedCount),
+        Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+    }));
 
     return repairedCount;
 }
@@ -1082,29 +1341,26 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
     const std::string& filePath,
     const HealClosedNarrowGap::Params& params)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path healLogPath =
         std::filesystem::path("assets") / "fixedClosedGap" / "HealClosedGapsLog.txt";
-    std::filesystem::create_directories(healLogPath.parent_path());
-    {
-        std::ofstream logFile(healLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "HealClosedNarrowGap log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open HealClosedNarrowGap log file: "
-                      << healLogPath.string() << std::endl;
-        }
-    }
+    Logger logger(healLogPath, "HealClosedNarrowGap");
+    reportLogOpenFailure(logger);
+    logger.run(Logger::Level::Info, "start", logFields({
+        Logger::pathField("output_step", filePath),
+        Logger::textField("log_level", Logger::levelName(logger.minimumLevel()))
+    }));
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot heal closed gaps because the XCAF document is null." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -1112,15 +1368,25 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int repairedCount = 0;
     int replacedCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
     for (std::size_t i = 0; i < targets.size(); ++i) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[i];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << i << " has no owner label, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "owner label is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1128,44 +1394,32 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
         const TopoDS_Shape originalShape = currentShape.IsNull() ? target.originalShape : currentShape;
         if (originalShape.IsNull()) {
             std::cerr << "Container " << i << " has null shape, skip." << std::endl;
+            ++skippedCount;
+            logger.container(Logger::Level::Warn, i, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "input shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
+
+        logger.container(Logger::Level::Info, i, "start", shapeTypeField(originalShape));
 
         HealClosedNarrowGap closedGapHealer(params);
         closedGapHealer.setInputShape(originalShape);
         const int containerRepairedCount = closedGapHealer.perform();
-
-        {
-            std::ofstream logFile(healLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[HealClosedNarrowGap] Container " << i
-                        << ", repairedCount=" << containerRepairedCount
-                        << ", modified=" << (closedGapHealer.isModified() ? "true" : "false")
-                        << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
-                        << std::endl;
-
-                const std::vector<std::string>& messages = closedGapHealer.getMessages();
-                if (messages.empty()) {
-                    logFile << "  (no messages)" << std::endl;
-                }
-                for (const std::string& message : messages) {
-                    if (message.empty()) {
-                        logFile << std::endl;
-                        continue;
-                    }
-                    logFile << "  - " << message << std::endl;
-                }
-                logFile << std::endl;
-            }
-            else {
-                std::cerr << "Warning: Cannot append HealClosedNarrowGap log file: "
-                          << healLogPath.string() << std::endl;
-            }
-        }
+        logger.containerMessages(i, "HealClosedNarrowGap", closedGapHealer.getMessages());
 
         TopoDS_Shape processedShape = closedGapHealer.getResultShape();
         if (processedShape.IsNull()) {
             std::cerr << "Container " << i << " produced a null result, keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1174,24 +1428,52 @@ int ApplicationInit::healClosedGapsOnLowestContainersAndExport(
                       << static_cast<int>(originalShape.ShapeType()) << " to "
                       << static_cast<int>(processedShape.ShapeType())
                       << ", keep original shape." << std::endl;
+            ++failedCount;
+            logger.container(Logger::Level::Error, i, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         if (!closedGapHealer.isModified()) {
+            logger.container(Logger::Level::Info, i, "end", logFields({
+                Logger::textField("status", "no_change"), Logger::boolField("modified", false),
+                Logger::integerField("repair_count", 0),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
         shapeTool->SetShape(target.ownerLabel, processedShape);
         repairedCount += containerRepairedCount;
         ++replacedCount;
+        logger.container(Logger::Level::Info, i, "end", logFields({
+            Logger::textField("status", "success"), Logger::boolField("modified", true),
+            Logger::integerField("repair_count", containerRepairedCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
     }
 
     shapeTool->UpdateAssemblies();
     refreshShapeCache();
     std::cout << "Replaced lowest containers after closed-gap heal: " << replacedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(failedCount > 0 ? Logger::Level::Warn : Logger::Level::Info, "end", logFields({
+        Logger::textField("status", failedCount > 0 ? "partial_success" : "success"),
+        Logger::integerField("container_count", static_cast<long long>(targets.size())),
+        Logger::integerField("modified_containers", replacedCount),
+        Logger::integerField("skipped_containers", skippedCount),
+        Logger::integerField("failed_containers", failedCount),
+        Logger::integerField("repair_count", repairedCount),
+        Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+    }));
 
     return repairedCount;
 }
@@ -1200,52 +1482,51 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
     const std::string& filePath,
     const ShapeRepairPipeline& pipeline)
 {
+    const RepairClock::time_point runStart = RepairClock::now();
     const std::filesystem::path outputPath(filePath);
     const std::filesystem::path outputDirectory = outputPath.parent_path().empty()
         ? std::filesystem::path(".")
         : outputPath.parent_path();
     const std::filesystem::path pipelineLogPath =
         outputDirectory / "ShapeRepairPipelineLog.txt";
-    std::filesystem::create_directories(outputDirectory);
+    Logger logger(pipelineLogPath, "ShapeRepairPipeline");
+    reportLogOpenFailure(logger);
+    logger.run(Logger::Level::Info, "start", logFields({
+        Logger::pathField("output_step", filePath),
+        Logger::textField("log_level", Logger::levelName(logger.minimumLevel())),
+        Logger::integerField("configured_stage_count", static_cast<long long>(pipeline.getStages().size()))
+    }));
 
-    {
-        std::ofstream logFile(pipelineLogPath, std::ios::out | std::ios::trunc);
-        if (logFile) {
-            logFile << "ShapeRepairPipeline log" << std::endl;
-            logFile << "Output STEP: " << filePath << std::endl;
-            logFile << "Configured stages:" << std::endl;
-            const std::vector<ShapeRepairPipeline::Stage>& stages = pipeline.getStages();
-            if (stages.empty()) {
-                logFile << "  (none)" << std::endl;
-            }
-            for (std::size_t stageIndex = 0; stageIndex < stages.size(); ++stageIndex) {
-                logFile << "  " << stageIndex << ": "
-                        << (stages[stageIndex].name.empty() ? "UnnamedStage" : stages[stageIndex].name)
-                        << ", enabled=" << (stages[stageIndex].enabled ? "true" : "false")
-                        << std::endl;
-            }
-            logFile << std::endl;
-        }
-        else {
-            std::cerr << "Warning: Cannot open repair pipeline log file: "
-                      << pipelineLogPath.string() << std::endl;
-        }
+    const std::vector<ShapeRepairPipeline::Stage>& configuredStages = pipeline.getStages();
+    for (std::size_t stageIndex = 0; stageIndex < configuredStages.size(); ++stageIndex) {
+        logger.run(Logger::Level::Info, "process", logFields({
+            Logger::textField("stage", "config"),
+            Logger::textField("action", "stage_configured"),
+            Logger::integerField("stage_index", static_cast<long long>(stageIndex)),
+            Logger::textField(
+                "algorithm",
+                configuredStages[stageIndex].name.empty() ? "UnnamedStage" : configuredStages[stageIndex].name),
+            Logger::boolField("enabled", configuredStages[stageIndex].enabled)
+        }));
     }
 
     if (pipeline.empty()) {
         std::cerr << "Error: Cannot run an empty repair pipeline." << std::endl;
+        logRunFailure(logger, runStart, "config", "repair pipeline is empty");
         return 0;
     }
 
     if (aDoc_.IsNull()) {
         std::cerr << "Error: Cannot run repair pipeline because the XCAF document is null."
                   << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF document is null");
         return 0;
     }
 
     Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
     if (shapeTool.IsNull()) {
         std::cerr << "Error: Failed to get XCAF shape tool." << std::endl;
+        logRunFailure(logger, runStart, "input_validate", "XCAF shape tool is null");
         return 0;
     }
 
@@ -1253,16 +1534,26 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
     collectTopLevelTargets(targets);
     if (targets.empty()) {
         std::cerr << "Error: Cannot find any editable solid/shell container." << std::endl;
+        logRunFailure(logger, runStart, "container_collect", "no editable solid/shell container");
         return 0;
     }
 
     int totalRepairCount = 0;
     int replacedContainerCount = 0;
+    int skippedContainerCount = 0;
+    int failedContainerCount = 0;
     for (std::size_t containerIndex = 0; containerIndex < targets.size(); ++containerIndex) {
+        const RepairClock::time_point containerStart = RepairClock::now();
         const EditableContainerTarget& target = targets[containerIndex];
         if (target.ownerLabel.IsNull()) {
             std::cerr << "Container " << containerIndex << " has no owner label, skip."
                       << std::endl;
+            ++skippedContainerCount;
+            logger.container(Logger::Level::Warn, containerIndex, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "owner label is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1273,97 +1564,90 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
         if (originalShape.IsNull()) {
             std::cerr << "Container " << containerIndex << " has null shape, skip."
                       << std::endl;
+            ++skippedContainerCount;
+            logger.container(Logger::Level::Warn, containerIndex, "end", logFields({
+                Logger::textField("status", "skipped"),
+                Logger::textField("reason", "input shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
+        logger.container(Logger::Level::Info, containerIndex, "start", shapeTypeField(originalShape));
+
         const ShapeRepairPipeline::Result pipelineResult = pipeline.perform(originalShape);
 
-        {
-            std::ofstream logFile(pipelineLogPath, std::ios::out | std::ios::app);
-            if (logFile) {
-                logFile << "[Container " << containerIndex << "]"
-                        << ", inputShapeType=" << TopologyUtils::ShapeTypeName(originalShape)
-                        << std::endl << std::endl;
-
-                for (std::size_t stageIndex = 0;
-                     stageIndex < pipelineResult.stageReports.size();
-                     ++stageIndex) {
-                    const ShapeRepairPipeline::StageReport& report =
-                        pipelineResult.stageReports[stageIndex];
-
-                    const char* status = "skipped";
-                    if (!report.enabled) {
-                        status = "disabled";
-                    }
-                    else if (!report.rejectionReason.empty()) {
-                        status = "rejected";
-                    }
-                    else if (report.accepted && report.modified) {
-                        status = "accepted";
-                    }
-                    else if (report.accepted) {
-                        status = "no-change";
-                    }
-
-                    logFile << "  [Stage " << stageIndex << ": " << report.name << "]"
-                            << std::endl;
-                    logFile << "    status=" << status
-                            << ", executed=" << (report.executed ? "true" : "false")
-                            << ", modified=" << (report.modified ? "true" : "false")
-                            << ", repairCount=" << report.repairCount
-                            << ", inputShapeType=" << TopologyUtils::ShapeTypeName(report.inputShapeType)
-                            << ", outputShapeType=" << TopologyUtils::ShapeTypeName(report.outputShapeType)
-                            << std::endl;
-
-                    if (!report.rejectionReason.empty()) {
-                        logFile << "    rejectionReason:" << std::endl
-                                << RepairDiagnostics::IndentMultiline(
-                                       RepairDiagnostics::MakeFailureReasonReadable(
-                                           report.rejectionReason),
-                                       "      ")
-                                << std::endl;
-                    }
-
-                    if (report.messages.empty()) {
-                        logFile << "    (no messages)" << std::endl;
-                    }
-                    for (const std::string& message : report.messages) {
-                        if (message.empty()) {
-                            logFile << std::endl;
-                            continue;
-                        }
-                        logFile << RepairDiagnostics::IndentMultiline(
-                                       "- " + message,
-                                       "    ")
-                                << std::endl;
-                    }
-                    logFile << std::endl;
-                }
-
-                if (!pipelineResult.messages.empty()) {
-                    logFile << "  [Pipeline messages]" << std::endl;
-                    for (const std::string& message : pipelineResult.messages) {
-                        logFile << RepairDiagnostics::IndentMultiline(
-                                       "- " + message,
-                                       "    ")
-                                << std::endl;
-                    }
-                    logFile << std::endl;
-                }
-
-                logFile << "  [Pipeline result]"
-                        << ", modified=" << (pipelineResult.modified ? "true" : "false")
-                        << ", rolledBack=" << (pipelineResult.rolledBack ? "true" : "false")
-                        << ", totalRepairCount=" << pipelineResult.totalRepairCount
-                        << std::endl << std::endl;
+        // 此时管线已经执行完所有启用阶段。按执行顺序统一写出阶段报告，
+        // 让各算法无需感知日志路径、Container 编号和当前日志等级。
+        for (std::size_t stageIndex = 0;
+             stageIndex < pipelineResult.stageReports.size();
+             ++stageIndex) {
+            const ShapeRepairPipeline::StageReport& report = pipelineResult.stageReports[stageIndex];
+            const char* stageStatus = "skipped";
+            Logger::Level stageLevel = Logger::Level::Info;
+            if (!report.enabled) {
+                stageStatus = "disabled";
             }
-            else {
-                std::cerr << "Warning: Cannot append repair pipeline log file: "
-                          << pipelineLogPath.string() << std::endl;
+            else if (!report.rejectionReason.empty()) {
+                stageStatus = "rejected";
+                stageLevel = Logger::Level::Warn;
             }
+            else if (report.accepted && report.modified) {
+                stageStatus = "accepted";
+            }
+            else if (report.accepted) {
+                stageStatus = "no_change";
+            }
+
+            logger.container(stageLevel, containerIndex, "process", logFields({
+                Logger::textField("stage", "repair"),
+                Logger::textField("action", "stage_completed"),
+                Logger::integerField("stage_index", static_cast<long long>(stageIndex)),
+                Logger::textField("algorithm", report.name),
+                Logger::textField("status", stageStatus),
+                Logger::boolField("executed", report.executed),
+                Logger::boolField("modified", report.modified),
+                Logger::integerField("repair_count", report.repairCount),
+                Logger::textField("input_shape_type", TopologyUtils::ShapeTypeName(report.inputShapeType)),
+                Logger::textField("output_shape_type", TopologyUtils::ShapeTypeName(report.outputShapeType))
+            }));
+
+            if (!report.rejectionReason.empty()) {
+                // 阶段结果被拒绝并不代表整个管线立即失败：该结果不会提交，
+                // 后续阶段仍可基于上一份已通过校验的 Shape 继续执行。
+                logger.containerText(Logger::Level::Warn, containerIndex, "process", logFields({
+                    Logger::textField("stage", "validate"),
+                    Logger::textField("action", "stage_rejected"),
+                    Logger::textField("algorithm", report.name)
+                }), "reason", report.rejectionReason);
+            }
+            logger.containerMessages(containerIndex, report.name, report.messages);
         }
 
+        logger.containerMessages(containerIndex, "ShapeRepairPipeline", pipelineResult.messages);
+
         if (!pipelineResult.modified) {
+            // “正常但没有修改”和“最终校验失败后回滚”都会保留原 Container，
+            // 但后者属于操作失败，必须用 ERROR 和 rolled_back=true 明确区分。
+            if (pipelineResult.rolledBack) {
+                ++failedContainerCount;
+                logger.container(Logger::Level::Error, containerIndex, "end", logFields({
+                    Logger::textField("status", "failed"),
+                    Logger::boolField("modified", false),
+                    Logger::boolField("rolled_back", true),
+                    Logger::textField("action", "keep_original"),
+                    Logger::textField("reason", "final pipeline validation rejected the result"),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
+            }
+            else {
+                logger.container(Logger::Level::Info, containerIndex, "end", logFields({
+                    Logger::textField("status", "no_change"),
+                    Logger::boolField("modified", false),
+                    Logger::integerField("repair_count", 0),
+                    Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+                }));
+            }
             continue;
         }
 
@@ -1371,6 +1655,13 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
             std::cerr << "Container " << containerIndex
                       << " pipeline produced a null result, keep original shape."
                       << std::endl;
+            ++failedContainerCount;
+            logger.container(Logger::Level::Error, containerIndex, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape is null"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1378,6 +1669,13 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
             std::cerr << "Container " << containerIndex
                       << " pipeline changed shape type, keep original shape."
                       << std::endl;
+            ++failedContainerCount;
+            logger.container(Logger::Level::Error, containerIndex, "end", logFields({
+                Logger::textField("status", "failed"), Logger::boolField("modified", false),
+                Logger::textField("action", "keep_original"),
+                Logger::textField("reason", "result shape type changed"),
+                Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+            }));
             continue;
         }
 
@@ -1385,6 +1683,13 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
         shapeTool->SetShape(target.ownerLabel, pipelineResult.resultShape);
         totalRepairCount += pipelineResult.totalRepairCount;
         ++replacedContainerCount;
+        logger.container(Logger::Level::Info, containerIndex, "end", logFields({
+            Logger::textField("status", "success"),
+            Logger::boolField("modified", true),
+            Logger::boolField("rolled_back", false),
+            Logger::integerField("repair_count", pipelineResult.totalRepairCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(containerStart))
+        }));
     }
 
     shapeTool->UpdateAssemblies();
@@ -1395,8 +1700,22 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
               << totalRepairCount << std::endl;
 
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
+        logRunFailure(logger, runStart, "export", "failed to write STEP document");
         return -1;
     }
+
+    logger.run(
+        failedContainerCount > 0 ? Logger::Level::Warn : Logger::Level::Info,
+        "end",
+        logFields({
+            Logger::textField("status", failedContainerCount > 0 ? "partial_success" : "success"),
+            Logger::integerField("container_count", static_cast<long long>(targets.size())),
+            Logger::integerField("modified_containers", replacedContainerCount),
+            Logger::integerField("skipped_containers", skippedContainerCount),
+            Logger::integerField("failed_containers", failedContainerCount),
+            Logger::integerField("repair_count", totalRepairCount),
+            Logger::integerField("duration_ms", elapsedMilliseconds(runStart))
+        }));
 
     return totalRepairCount;
 }
