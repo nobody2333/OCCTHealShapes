@@ -14,7 +14,7 @@
 class BRepTools_ReShape;
 
 // 处理由 face 边界组成的闭合多边细缝。
-// 第一版识别由单面边界 edge 组成的闭合 loop，并优先尝试用中线 edge chain 收缩两侧边界。
+// 支持尖点端部和短 edge 连接端部，并优先尝试用中线 edge chain 收缩两侧边界。
 class HealClosedNarrowGap {
 public:
     // 指定中线 edge chain 的构造方式；Auto 保持原有自动分派行为。
@@ -33,6 +33,12 @@ public:
         double minLengthWidthRatio = 5.0;
         // 识别细缝端部尖点时允许的最大夹角。
         double maxTipAngle = 35.0 * 3.14159265358979323846 / 180.0;
+        // 是否识别由短 edge 连接两侧 chain 的非尖点端部。
+        bool detectShortEdgeEnds = true;
+        // 短端边最大长度相对于 maxGapWidth 的倍数。
+        double maxEndEdgeLengthFactor = 2.0;
+        // 短端边两侧相邻 edge 相对于短端边的最小长度倍数。
+        double minAdjacentEdgeLengthRatio = 3.0;
         // 关闭宽度自适应采样或参数无效时，每侧使用的固定宽度采样点数。
         int widthSampleCount = 20;
         // 是否根据两侧 chain 的较长长度自适应计算宽度检测采样点数。
@@ -60,6 +66,22 @@ public:
             MidlineConstructionMode::Auto;
         // 投影点靠近对侧已有顶点时，允许吸附成真实顶点配对的几何容差。
         double projectionVertexSnapTolerance = 1.0e-4;
+        // 中线收缩失败时，是否允许删除 wire 异常的 face，并用剩余边界拟合新 face。
+        bool useDeleteAndFillDefectiveFace = true;
+        // DeleteAndFillDefectiveFace 拟合 B-spline 支撑面的工作容差。
+        double deleteAndFillTolerance = 1.0e-3;
+        // DeleteAndFillDefectiveFace 允许的最大边界 G0 偏差。
+        double deleteAndFillMaxG0Error = 1.0e-1;
+        // BRepFill_Filling 的初始曲面次数。
+        int deleteAndFillDegree = 3;
+        // 每条边界曲线参与拟合的离散点数。
+        int deleteAndFillPointsOnCurve = 15;
+        // BRepFill_Filling 的迭代次数。
+        int deleteAndFillIterations = 2;
+        // 限制补面 B-spline 的最高次数，避免生成过度复杂的曲面。
+        int deleteAndFillMaxDegree = 6;
+        // 限制补面 B-spline 的最大分段数。
+        int deleteAndFillMaxSegments = 16;
         // 中线收缩失败时，是否回退到“一侧 chain 替换另一侧 chain”的保守方案。
         bool fallbackToSideReplacement = true;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
@@ -103,6 +125,21 @@ public:
     int perform(const TopoDS_Shape& shape);
 
 private:
+    // 闭合细缝端部可以是两侧共用尖点，也可以是连接两侧的短 edge。
+    enum class GapEndType {
+        SharedTip,
+        ShortEdge
+    };
+
+    struct GapEnd {
+        GapEndType type = GapEndType::SharedTip;
+        TopoDS_Vertex vertexA;
+        TopoDS_Vertex vertexB;
+        TopoDS_Edge connectorEdge;
+        TopoDS_Face connectorOwnerFace;
+        double score = 0.0;
+    };
+
     // 细缝边界的一侧连续 edge chain，edges 和 vertices 均按采样方向排列。
     struct EdgeChain {
         std::vector<TopoDS_Edge> edges;
@@ -115,8 +152,8 @@ private:
     struct ClosedGapCandidate {
         EdgeChain chainA;
         EdgeChain chainB;
-        std::vector<TopoDS_Edge> loopEdges;
-        std::vector<TopoDS_Vertex> tipVertices;
+        GapEnd startEnd;
+        GapEnd finishEnd;
         double meanWidth = 0.0;
         double maxWidth = 0.0;
         double maxWidthAToB = 0.0;
@@ -124,7 +161,9 @@ private:
         int usedWidthSampleCount = 0;
         double lengthRatio = 0.0;
         double lengthWidthRatio = 0.0;
-        double endpointSharpness = 0.0;
+        double endpointSpan = 0.0;
+        double endpointSpanWidthRatio = 0.0;
+        double endpointScore = 0.0;
         double confidence = 0.0;
     };
 
@@ -210,6 +249,16 @@ private:
     struct FaceReplacementPlan {
         TopoDS_Face face;
         std::vector<EdgeReplacementTask> edgeTasks;
+        // 非尖点端部收缩后，短连接 edge 必须从所属 wire 中移除。
+        std::vector<TopoDS_Edge> edgesToRemove;
+    };
+
+    // 删除缺陷 face 后，用仍被其他 face 使用的边和细缝另一侧边组成新的补面边界。
+    struct DeleteAndFillPlan {
+        TopoDS_Face defectiveFace;
+        EdgeChain boundary;
+        std::vector<TopoDS_Edge> removedEdges;
+        int missingWireEdgeUses = 0;
     };
 
     Params params_;
@@ -231,6 +280,24 @@ private:
         const ClosedGapCandidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
+
+    bool tryRepairByDeletingAndFillingDefectiveFace(
+        const TopoDS_Shape& currentShape,
+        const ClosedGapCandidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage);
+
+    bool buildDeleteAndFillPlan(
+        const TopoDS_Shape& currentShape,
+        const ClosedGapCandidate& candidate,
+        DeleteAndFillPlan& plan,
+        std::string& errorMessage) const;
+
+    bool buildDeleteAndFillPatchFace(
+        const DeleteAndFillPlan& plan,
+        TopoDS_Face& patchFace,
+        double& g0Error,
+        std::string& errorMessage) const;
 
     bool tryRepairBySideReplacement(
         const TopoDS_Shape& currentShape,
@@ -264,6 +331,17 @@ private:
     bool buildMidlineChain(
         const ClosedGapCandidate& candidate,
         MidlineChainData& midlineData,
+        std::string& errorMessage) const;
+
+    bool isCandidateEndConsistent(
+        const GapEnd& end,
+        const TopoDS_Vertex& vertexA,
+        const TopoDS_Vertex& vertexB) const;
+
+    // 尖点端部复用原 vertex；短 edge 端部在两个端点的几何中点创建统一 vertex。
+    bool buildTargetEndVertex(
+        const GapEnd& end,
+        TopoDS_Vertex& targetVertex,
         std::string& errorMessage) const;
 
     bool canUseLegacyOneToOnePath(
@@ -358,6 +436,8 @@ private:
     static const char* midlineConstructionModeName(
         MidlineConstructionMode mode);
 
+    static const char* gapEndTypeName(GapEndType type);
+
     bool rebuildFacesByCollapsingToMidline(
         const TopoDS_Shape& currentShape,
         const ClosedGapCandidate& candidate,
@@ -368,6 +448,7 @@ private:
     bool rebuildFaceByReplacingMappedEdges(
         const TopoDS_Face& faceToRebuild,
         const std::vector<EdgeReplacementTask>& edgeTasks,
+        const std::vector<TopoDS_Edge>& edgesToRemove,
         const EdgeChain& midlineChain,
         BRepTools_ReShape& topologyReshaper,
         double tolerance,
@@ -393,6 +474,7 @@ private:
         const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& afterShape,
         const EdgeChain& keptChain,
+        const std::vector<TopoDS_Edge>& removedEdges,
         int freeEdgesBefore,
         std::string& errorMessage) const;
 

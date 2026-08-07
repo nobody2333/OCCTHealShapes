@@ -14,6 +14,9 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepFill_Filling.hxx>
+#include <BRepLib_CheckCurveOnSurface.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <Extrema_ExtPC.hxx>
@@ -21,12 +24,17 @@
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GCPnts_UniformAbscissa.hxx>
 #include <GeomAPI_Interpolate.hxx>
+#include <GeomAbs_Shape.hxx>
+#include <Geom2d_Curve.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Wire.hxx>
+#include <ShapeConstruct_ProjectCurveOnSurface.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs.hxx>
 #include <TopExp.hxx>
@@ -199,6 +207,16 @@ bool isSameFaceInVector(const std::vector<TopoDS_Face>& faces, const TopoDS_Face
     return false;
 }
 
+bool isSameEdgeInVector(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge)
+{
+    for (const TopoDS_Edge& existingEdge : edges) {
+        if (!existingEdge.IsNull() && existingEdge.IsSame(edge)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isBoundaryEdgeUsable(const TopoDS_Edge& edge, const TopoDS_Face& ownerFace)
 {
     if (edge.IsNull() || ownerFace.IsNull()) {
@@ -316,6 +334,14 @@ HealClosedNarrowGap::HealClosedNarrowGap(const Params& params)
     params_.maxGapWidth = std::max(params_.maxGapWidth, Precision::Confusion());
     params_.minLengthRatio = clamp01(params_.minLengthRatio);
     params_.minLengthWidthRatio = std::max(1.0, params_.minLengthWidthRatio);
+    if (!std::isfinite(params_.maxEndEdgeLengthFactor) ||
+        params_.maxEndEdgeLengthFactor <= Precision::Confusion()) {
+        params_.maxEndEdgeLengthFactor = 2.0;
+    }
+    if (!std::isfinite(params_.minAdjacentEdgeLengthRatio) ||
+        params_.minAdjacentEdgeLengthRatio < 1.0) {
+        params_.minAdjacentEdgeLengthRatio = 3.0;
+    }
     params_.widthSampleCount = std::max(2, params_.widthSampleCount);
     params_.minWidthSampleCount = std::max(2, params_.minWidthSampleCount);
     params_.maxWidthSampleCount = std::max(
@@ -335,6 +361,31 @@ HealClosedNarrowGap::HealClosedNarrowGap(const Params& params)
     params_.projectionVertexSnapTolerance = std::max(
         params_.projectionVertexSnapTolerance,
         Precision::Confusion());
+    if (!std::isfinite(params_.deleteAndFillTolerance)) {
+        params_.deleteAndFillTolerance = 1.0e-3;
+    }
+    params_.deleteAndFillTolerance = std::max(
+        params_.deleteAndFillTolerance,
+        Precision::Confusion());
+    if (!std::isfinite(params_.deleteAndFillMaxG0Error)) {
+        params_.deleteAndFillMaxG0Error = 1.0e-1;
+    }
+    params_.deleteAndFillMaxG0Error = std::max(
+        params_.deleteAndFillMaxG0Error,
+        params_.deleteAndFillTolerance);
+    params_.deleteAndFillDegree = std::max(2, params_.deleteAndFillDegree);
+    params_.deleteAndFillPointsOnCurve = std::max(
+        2,
+        params_.deleteAndFillPointsOnCurve);
+    params_.deleteAndFillIterations = std::max(
+        1,
+        params_.deleteAndFillIterations);
+    params_.deleteAndFillMaxDegree = std::max(
+        params_.deleteAndFillDegree,
+        params_.deleteAndFillMaxDegree);
+    params_.deleteAndFillMaxSegments = std::max(
+        1,
+        params_.deleteAndFillMaxSegments);
 }
 
 void HealClosedNarrowGap::setInputShape(const TopoDS_Shape& shape)
@@ -371,6 +422,12 @@ int HealClosedNarrowGap::perform()
            << ", minLengthRatio=" << params_.minLengthRatio
            << ", minLengthWidthRatio=" << params_.minLengthWidthRatio
            << ", maxTipAngle=" << params_.maxTipAngle
+           << ", detectShortEdgeEnds="
+           << (params_.detectShortEdgeEnds ? "true" : "false")
+           << ", maxEndEdgeLengthFactor="
+           << params_.maxEndEdgeLengthFactor
+           << ", minAdjacentEdgeLengthRatio="
+           << params_.minAdjacentEdgeLengthRatio
            << ", widthSampleCount=" << params_.widthSampleCount
            << ", useAdaptiveWidthSampleCount="
            << (params_.useAdaptiveWidthSampleCount ? "true" : "false")
@@ -389,6 +446,22 @@ int HealClosedNarrowGap::perform()
            << midlineConstructionModeName(params_.midlineConstructionMode)
            << ", projectionVertexSnapTolerance="
            << params_.projectionVertexSnapTolerance
+           << ", useDeleteAndFillDefectiveFace="
+           << (params_.useDeleteAndFillDefectiveFace ? "true" : "false")
+           << ", deleteAndFillTolerance="
+           << params_.deleteAndFillTolerance
+           << ", deleteAndFillMaxG0Error="
+           << params_.deleteAndFillMaxG0Error
+           << ", deleteAndFillDegree="
+           << params_.deleteAndFillDegree
+           << ", deleteAndFillPointsOnCurve="
+           << params_.deleteAndFillPointsOnCurve
+           << ", deleteAndFillIterations="
+           << params_.deleteAndFillIterations
+           << ", deleteAndFillMaxDegree="
+           << params_.deleteAndFillMaxDegree
+           << ", deleteAndFillMaxSegments="
+           << params_.deleteAndFillMaxSegments
            << ", fallbackToSideReplacement=" << (params_.fallbackToSideReplacement ? "true" : "false")
            << ", midlineRepairTolerance=" << params_.midlineRepairTolerance
            << ", runShapeFixAfterRepair="
@@ -428,6 +501,10 @@ int HealClosedNarrowGap::perform()
                 os << "Candidate failed:"
                    << "\n  chainAEdges=" << candidate.chainA.edges.size()
                    << "\n  chainBEdges=" << candidate.chainB.edges.size()
+                   << "\n  startEnd="
+                   << gapEndTypeName(candidate.startEnd.type)
+                   << "\n  finishEnd="
+                   << gapEndTypeName(candidate.finishEnd.type)
                    << "\n  maxWidth=" << candidate.maxWidth
                    << "\n  maxWidthAToB=" << candidate.maxWidthAToB
                    << "\n  maxWidthBToA=" << candidate.maxWidthBToA
@@ -436,7 +513,10 @@ int HealClosedNarrowGap::perform()
                    << candidate.usedWidthSampleCount
                    << "\n  lengthRatio=" << candidate.lengthRatio
                    << "\n  lengthWidthRatio=" << candidate.lengthWidthRatio
-                   << "\n  endpointSharpness=" << candidate.endpointSharpness
+                   << "\n  endpointSpan=" << candidate.endpointSpan
+                   << "\n  endpointSpanWidthRatio="
+                   << candidate.endpointSpanWidthRatio
+                   << "\n  endpointScore=" << candidate.endpointScore
                    << "\n  confidence=" << candidate.confidence
                    << "\n  reason:"
                    << "\n" << RepairDiagnostics::IndentMultiline(
@@ -455,6 +535,10 @@ int HealClosedNarrowGap::perform()
             std::ostringstream os;
             os << "Repaired candidate: chainAEdges=" << candidate.chainA.edges.size()
                << ", chainBEdges=" << candidate.chainB.edges.size()
+               << ", startEnd="
+               << gapEndTypeName(candidate.startEnd.type)
+               << ", finishEnd="
+               << gapEndTypeName(candidate.finishEnd.type)
                << ", maxWidth=" << candidate.maxWidth
                << ", maxWidthAToB=" << candidate.maxWidthAToB
                << ", maxWidthBToA=" << candidate.maxWidthBToA
@@ -463,7 +547,10 @@ int HealClosedNarrowGap::perform()
                << candidate.usedWidthSampleCount
                << ", lengthRatio=" << candidate.lengthRatio
                << ", lengthWidthRatio=" << candidate.lengthWidthRatio
-               << ", endpointSharpness=" << candidate.endpointSharpness
+               << ", endpointSpan=" << candidate.endpointSpan
+               << ", endpointSpanWidthRatio="
+               << candidate.endpointSpanWidthRatio
+               << ", endpointScore=" << candidate.endpointScore
                << ", confidence=" << candidate.confidence;
             appendMessage(os.str());
             break;
@@ -506,6 +593,21 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
             continue;
         }
 
+        std::vector<double> edgeLengths(static_cast<std::size_t>(edgeCount), 0.0);
+        bool edgeLengthsValid = true;
+        for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex) {
+            const double length = GeometryUtils::ComputeEdgeLength(
+                loop.edges[static_cast<std::size_t>(edgeIndex)]);
+            if (!std::isfinite(length) || length <= Precision::Confusion()) {
+                edgeLengthsValid = false;
+                break;
+            }
+            edgeLengths[static_cast<std::size_t>(edgeIndex)] = length;
+        }
+        if (!edgeLengthsValid) {
+            continue;
+        }
+
         std::vector<int> tipIndices;
         std::vector<double> tipScores(edgeCount, 0.0);
         for (int i = 0; i < edgeCount; ++i) {
@@ -523,112 +625,341 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
                 1.0 - clamp01(angle / std::max(params_.maxTipAngle, Precision::Confusion()));
         }
 
-        if (tipIndices.size() < 2) {
+        auto buildForwardChain = [&](int startVertexIndex,
+                                     int endVertexIndex,
+                                     EdgeChain& chain) {
+            chain = EdgeChain();
+            startVertexIndex = (startVertexIndex + edgeCount) % edgeCount;
+            endVertexIndex = (endVertexIndex + edgeCount) % edgeCount;
+            chain.vertices.push_back(
+                loop.vertices[static_cast<std::size_t>(startVertexIndex)]);
+
+            int edgeIndex = startVertexIndex;
+            int traversed = 0;
+            while (edgeIndex != endVertexIndex && traversed < edgeCount) {
+                const int nextVertexIndex = (edgeIndex + 1) % edgeCount;
+                const TopoDS_Vertex from =
+                    loop.vertices[static_cast<std::size_t>(edgeIndex)];
+                const TopoDS_Vertex to =
+                    loop.vertices[static_cast<std::size_t>(nextVertexIndex)];
+                const TopoDS_Edge edge = orientEdgeFromTo(
+                    loop.edges[static_cast<std::size_t>(edgeIndex)],
+                    from,
+                    to);
+                chain.edges.push_back(edge);
+                chain.ownerFaces.push_back(
+                    loop.ownerFaces[static_cast<std::size_t>(edgeIndex)]);
+                chain.vertices.push_back(to);
+                chain.length +=
+                    edgeLengths[static_cast<std::size_t>(edgeIndex)];
+                edgeIndex = nextVertexIndex;
+                ++traversed;
+            }
+
+            return edgeIndex == endVertexIndex &&
+                !chain.edges.empty() &&
+                chain.vertices.size() == chain.edges.size() + 1 &&
+                std::isfinite(chain.length) &&
+                chain.length > Precision::Confusion();
+        };
+
+        auto reverseChain = [&](const EdgeChain& source, EdgeChain& reversed) {
+            reversed = EdgeChain();
+            if (source.edges.empty() ||
+                source.vertices.size() != source.edges.size() + 1) {
+                return false;
+            }
+
+            reversed.vertices.push_back(source.vertices.back());
+            for (std::size_t reverseIndex = source.edges.size();
+                 reverseIndex > 0;
+                 --reverseIndex) {
+                const std::size_t sourceIndex = reverseIndex - 1;
+                const TopoDS_Vertex from = source.vertices[sourceIndex + 1];
+                const TopoDS_Vertex to = source.vertices[sourceIndex];
+                reversed.edges.push_back(orientEdgeFromTo(
+                    source.edges[sourceIndex], from, to));
+                reversed.ownerFaces.push_back(
+                    source.ownerFaces[sourceIndex]);
+                reversed.vertices.push_back(to);
+            }
+            reversed.length = source.length;
+            return true;
+        };
+
+        auto makeTipEnd = [&](int vertexIndex) {
+            GapEnd end;
+            end.type = GapEndType::SharedTip;
+            end.vertexA = loop.vertices[static_cast<std::size_t>(vertexIndex)];
+            end.vertexB = end.vertexA;
+            end.score = tipScores[static_cast<std::size_t>(vertexIndex)];
+            return end;
+        };
+
+        auto makeShortEdgeEnd = [&](int edgeIndex,
+                                    const TopoDS_Vertex& vertexA,
+                                    const TopoDS_Vertex& vertexB,
+                                    double score) {
+            GapEnd end;
+            end.type = GapEndType::ShortEdge;
+            end.vertexA = vertexA;
+            end.vertexB = vertexB;
+            end.connectorEdge =
+                loop.edges[static_cast<std::size_t>(edgeIndex)];
+            end.connectorOwnerFace =
+                loop.ownerFaces[static_cast<std::size_t>(edgeIndex)];
+            end.score = score;
+            return end;
+        };
+
+        auto appendCandidate = [&](const EdgeChain& chainA,
+                                   const EdgeChain& chainB,
+                                   const GapEnd& startEnd,
+                                   const GapEnd& finishEnd) {
+            if (chainA.edges.empty() || chainB.edges.empty() ||
+                chainA.vertices.size() != chainA.edges.size() + 1 ||
+                chainB.vertices.size() != chainB.edges.size() + 1 ||
+                !isCandidateEndConsistent(
+                    startEnd,
+                    chainA.vertices.front(),
+                    chainB.vertices.front()) ||
+                !isCandidateEndConsistent(
+                    finishEnd,
+                    chainA.vertices.back(),
+                    chainB.vertices.back())) {
+                return;
+            }
+
+            ClosedGapCandidate candidate;
+            candidate.chainA = chainA;
+            candidate.chainB = chainB;
+            candidate.startEnd = startEnd;
+            candidate.finishEnd = finishEnd;
+            candidate.endpointScore =
+                0.5 * (startEnd.score + finishEnd.score);
+
+            auto endpointPoint = [](const GapEnd& end, gp_Pnt& point) {
+                if (end.vertexA.IsNull() || end.vertexB.IsNull()) {
+                    return false;
+                }
+                try {
+                    const gp_Pnt pointA = BRep_Tool::Pnt(end.vertexA);
+                    const gp_Pnt pointB = BRep_Tool::Pnt(end.vertexB);
+                    point.SetCoord(
+                        0.5 * (pointA.X() + pointB.X()),
+                        0.5 * (pointA.Y() + pointB.Y()),
+                        0.5 * (pointA.Z() + pointB.Z()));
+                    return isFinitePoint(point);
+                }
+                catch (const Standard_Failure&) {
+                    return false;
+                }
+            };
+
+            gp_Pnt startPoint;
+            gp_Pnt finishPoint;
+            if (!endpointPoint(startEnd, startPoint) ||
+                !endpointPoint(finishEnd, finishPoint)) {
+                return;
+            }
+            candidate.endpointSpan = startPoint.Distance(finishPoint);
+            if (!std::isfinite(candidate.endpointSpan) ||
+                candidate.endpointSpan <= Precision::Confusion()) {
+                return;
+            }
+
+            std::string gapError;
+            if (!evaluateBidirectionalGap(
+                    candidate.chainA,
+                    candidate.chainB,
+                    candidate.maxWidthAToB,
+                    candidate.maxWidthBToA,
+                    candidate.meanWidth,
+                    candidate.usedWidthSampleCount,
+                    gapError)) {
+                return;
+            }
+
+            candidate.maxWidth = std::max(
+                candidate.maxWidthAToB,
+                candidate.maxWidthBToA);
+            candidate.lengthRatio =
+                std::min(chainA.length, chainB.length) /
+                std::max(chainA.length, chainB.length);
+            candidate.lengthWidthRatio =
+                0.5 * (chainA.length + chainB.length) /
+                std::max(candidate.meanWidth, Precision::Confusion());
+
+            double endpointWidthReference = candidate.maxWidth;
+            try {
+                if (startEnd.type == GapEndType::ShortEdge) {
+                    endpointWidthReference = std::max(
+                        endpointWidthReference,
+                        BRep_Tool::Pnt(startEnd.vertexA).Distance(
+                            BRep_Tool::Pnt(startEnd.vertexB)));
+                }
+                if (finishEnd.type == GapEndType::ShortEdge) {
+                    endpointWidthReference = std::max(
+                        endpointWidthReference,
+                        BRep_Tool::Pnt(finishEnd.vertexA).Distance(
+                            BRep_Tool::Pnt(finishEnd.vertexB)));
+                }
+            }
+            catch (const Standard_Failure&) {
+                return;
+            }
+            candidate.endpointSpanWidthRatio =
+                candidate.endpointSpan /
+                std::max(endpointWidthReference, Precision::Confusion());
+            const bool hasShortEdgeEnd =
+                startEnd.type == GapEndType::ShortEdge ||
+                finishEnd.type == GapEndType::ShortEdge;
+
+            if (candidate.maxWidth > params_.maxGapWidth ||
+                candidate.lengthRatio + Precision::Confusion() <
+                    params_.minLengthRatio ||
+                candidate.lengthWidthRatio + Precision::Confusion() <
+                    params_.minLengthWidthRatio ||
+                (hasShortEdgeEnd &&
+                    candidate.endpointSpanWidthRatio +
+                            Precision::Confusion() <
+                        params_.minLengthWidthRatio)) {
+                return;
+            }
+
+            const double widthScore =
+                1.0 - clamp01(candidate.maxWidth / params_.maxGapWidth);
+            const double ratioScore = clamp01(candidate.lengthRatio);
+            const double slenderScore = clamp01(
+                candidate.lengthWidthRatio /
+                std::max(params_.minLengthWidthRatio * 2.0, 1.0));
+            candidate.confidence =
+                0.40 * widthScore +
+                0.25 * slenderScore +
+                0.20 * ratioScore +
+                0.15 * clamp01(candidate.endpointScore);
+            candidates.push_back(candidate);
+        };
+
+        // 原有双尖点路径保持不变：两个尖点把闭合 loop 分成方向一致的两侧 chain。
+        if (tipIndices.size() >= 2) {
+            for (std::size_t lhs = 0; lhs < tipIndices.size(); ++lhs) {
+                for (std::size_t rhs = lhs + 1; rhs < tipIndices.size(); ++rhs) {
+                    const int startIndex = tipIndices[lhs];
+                    const int endIndex = tipIndices[rhs];
+                    EdgeChain chainA;
+                    EdgeChain reversePath;
+                    EdgeChain chainB;
+                    if (!buildForwardChain(startIndex, endIndex, chainA) ||
+                        !buildForwardChain(endIndex, startIndex, reversePath) ||
+                        !reverseChain(reversePath, chainB)) {
+                        continue;
+                    }
+                    appendCandidate(
+                        chainA,
+                        chainB,
+                        makeTipEnd(startIndex),
+                        makeTipEnd(endIndex));
+                }
+            }
             continue;
         }
 
-        for (std::size_t lhs = 0; lhs < tipIndices.size(); ++lhs) {
-            for (std::size_t rhs = lhs + 1; rhs < tipIndices.size(); ++rhs) {
-                const int startIndex = tipIndices[lhs];
-                const int endIndex = tipIndices[rhs];
+        if (!params_.detectShortEdgeEnds) {
+            continue;
+        }
 
+        // 非尖点端部必须是有效短 edge，且它两侧相邻 edge 都明显更长。
+        const double maxEndEdgeLength =
+            params_.maxGapWidth * params_.maxEndEdgeLengthFactor;
+        std::vector<int> shortEndEdgeIndices;
+        std::vector<double> shortEndScores(
+            static_cast<std::size_t>(edgeCount), 0.0);
+        for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex) {
+            const int previousIndex =
+                (edgeIndex + edgeCount - 1) % edgeCount;
+            const int nextIndex = (edgeIndex + 1) % edgeCount;
+            const double edgeLength =
+                edgeLengths[static_cast<std::size_t>(edgeIndex)];
+            const double shorterAdjacentLength = std::min(
+                edgeLengths[static_cast<std::size_t>(previousIndex)],
+                edgeLengths[static_cast<std::size_t>(nextIndex)]);
+            if (edgeLength > maxEndEdgeLength ||
+                shorterAdjacentLength + Precision::Confusion() <
+                    edgeLength * params_.minAdjacentEdgeLengthRatio) {
+                continue;
+            }
+
+            shortEndEdgeIndices.push_back(edgeIndex);
+            shortEndScores[static_cast<std::size_t>(edgeIndex)] =
+                1.0 - clamp01(
+                    edgeLength /
+                    std::max(maxEndEdgeLength, Precision::Confusion()));
+        }
+
+        if (tipIndices.size() == 1) {
+            // 一个尖点和一条对侧短端边共同定义两侧 chain。
+            const int tipIndex = tipIndices.front();
+            for (const int endEdgeIndex : shortEndEdgeIndices) {
                 EdgeChain chainA;
-                EdgeChain pathB;
-                int guard = 0;
-                int index = startIndex;
-                chainA.vertices.push_back(loop.vertices[static_cast<std::size_t>(startIndex)]);
-                while (index != endIndex && guard++ <= edgeCount) {
-                    const int nextIndex = (index + 1) % edgeCount;
-                    const TopoDS_Vertex from = loop.vertices[static_cast<std::size_t>(index)];
-                    const TopoDS_Vertex to = loop.vertices[static_cast<std::size_t>(nextIndex)];
-                    const TopoDS_Edge edge = orientEdgeFromTo(loop.edges[static_cast<std::size_t>(index)], from, to);
-                    chainA.edges.push_back(edge);
-                    chainA.ownerFaces.push_back(loop.ownerFaces[static_cast<std::size_t>(index)]);
-                    chainA.vertices.push_back(to);
-                    chainA.length += GeometryUtils::ComputeEdgeLength(edge);
-                    index = nextIndex;
-                }
-
-                guard = 0;
-                index = endIndex;
-                pathB.vertices.push_back(loop.vertices[static_cast<std::size_t>(endIndex)]);
-                while (index != startIndex && guard++ <= edgeCount) {
-                    const int nextIndex = (index + 1) % edgeCount;
-                    const TopoDS_Vertex from = loop.vertices[static_cast<std::size_t>(index)];
-                    const TopoDS_Vertex to = loop.vertices[static_cast<std::size_t>(nextIndex)];
-                    const TopoDS_Edge edge = orientEdgeFromTo(loop.edges[static_cast<std::size_t>(index)], from, to);
-                    pathB.edges.push_back(edge);
-                    pathB.ownerFaces.push_back(loop.ownerFaces[static_cast<std::size_t>(index)]);
-                    pathB.vertices.push_back(to);
-                    pathB.length += GeometryUtils::ComputeEdgeLength(edge);
-                    index = nextIndex;
-                }
-
-                if (chainA.edges.empty() || pathB.edges.empty()) {
-                    continue;
-                }
-
+                EdgeChain reversePath;
                 EdgeChain chainB;
-                chainB.vertices.push_back(pathB.vertices.back());
-                for (int i = static_cast<int>(pathB.edges.size()) - 1; i >= 0; --i) {
-                    const TopoDS_Vertex from = pathB.vertices[static_cast<std::size_t>(i + 1)];
-                    const TopoDS_Vertex to = pathB.vertices[static_cast<std::size_t>(i)];
-                    const TopoDS_Edge edge = orientEdgeFromTo(pathB.edges[static_cast<std::size_t>(i)], from, to);
-                    chainB.edges.push_back(edge);
-                    chainB.ownerFaces.push_back(pathB.ownerFaces[static_cast<std::size_t>(i)]);
-                    chainB.vertices.push_back(to);
-                    chainB.length += GeometryUtils::ComputeEdgeLength(edge);
-                }
-
-                if (chainA.length <= Precision::Confusion() || chainB.length <= Precision::Confusion()) {
+                if (!buildForwardChain(tipIndex, endEdgeIndex, chainA) ||
+                    !buildForwardChain(
+                        (endEdgeIndex + 1) % edgeCount,
+                        tipIndex,
+                        reversePath) ||
+                    !reverseChain(reversePath, chainB)) {
                     continue;
                 }
 
-                ClosedGapCandidate candidate;
-                candidate.chainA = chainA;
-                candidate.chainB = chainB;
-                candidate.loopEdges = loop.edges;
-                candidate.tipVertices.push_back(loop.vertices[static_cast<std::size_t>(startIndex)]);
-                candidate.tipVertices.push_back(loop.vertices[static_cast<std::size_t>(endIndex)]);
-                candidate.endpointSharpness =
-                    0.5 * (tipScores[static_cast<std::size_t>(startIndex)]
-                         + tipScores[static_cast<std::size_t>(endIndex)]);
+                const GapEnd shortEnd = makeShortEdgeEnd(
+                    endEdgeIndex,
+                    chainA.vertices.back(),
+                    chainB.vertices.back(),
+                    shortEndScores[static_cast<std::size_t>(endEdgeIndex)]);
+                appendCandidate(
+                    chainA,
+                    chainB,
+                    makeTipEnd(tipIndex),
+                    shortEnd);
+            }
+            continue;
+        }
 
-                std::string gapError;
-                if (!evaluateBidirectionalGap(
-                        candidate.chainA,
-                        candidate.chainB,
-                        candidate.maxWidthAToB,
-                        candidate.maxWidthBToA,
-                        candidate.meanWidth,
-                        candidate.usedWidthSampleCount,
-                        gapError)) {
+        // 没有尖点时，两条短端边分别收缩为中线的起点和终点。
+        for (std::size_t lhs = 0; lhs < shortEndEdgeIndices.size(); ++lhs) {
+            for (std::size_t rhs = lhs + 1;
+                 rhs < shortEndEdgeIndices.size();
+                 ++rhs) {
+                const int startEdgeIndex = shortEndEdgeIndices[lhs];
+                const int finishEdgeIndex = shortEndEdgeIndices[rhs];
+                EdgeChain chainA;
+                EdgeChain reversePath;
+                EdgeChain chainB;
+                if (!buildForwardChain(
+                        (startEdgeIndex + 1) % edgeCount,
+                        finishEdgeIndex,
+                        chainA) ||
+                    !buildForwardChain(
+                        (finishEdgeIndex + 1) % edgeCount,
+                        startEdgeIndex,
+                        reversePath) ||
+                    !reverseChain(reversePath, chainB)) {
                     continue;
                 }
 
-                candidate.maxWidth = std::max(
-                    candidate.maxWidthAToB,
-                    candidate.maxWidthBToA);
-                candidate.lengthRatio = std::min(chainA.length, chainB.length) / std::max(chainA.length, chainB.length);
-                candidate.lengthWidthRatio =
-                    0.5 * (chainA.length + chainB.length) / std::max(candidate.meanWidth, Precision::Confusion());
-
-                if (candidate.maxWidth > params_.maxGapWidth ||
-                    candidate.lengthRatio + Precision::Confusion() < params_.minLengthRatio ||
-                    candidate.lengthWidthRatio + Precision::Confusion() < params_.minLengthWidthRatio) {
-                    continue;
-                }
-
-                const double widthScore = 1.0 - clamp01(candidate.maxWidth / params_.maxGapWidth);
-                const double ratioScore = clamp01(candidate.lengthRatio);
-                const double slenderScore =
-                    clamp01(candidate.lengthWidthRatio / std::max(params_.minLengthWidthRatio * 2.0, 1.0));
-                candidate.confidence =
-                    0.40 * widthScore +
-                    0.25 * slenderScore +
-                    0.20 * ratioScore +
-                    0.15 * clamp01(candidate.endpointSharpness);
-                candidates.push_back(candidate);
+                const GapEnd startEnd = makeShortEdgeEnd(
+                    startEdgeIndex,
+                    chainA.vertices.front(),
+                    chainB.vertices.front(),
+                    shortEndScores[static_cast<std::size_t>(startEdgeIndex)]);
+                const GapEnd finishEnd = makeShortEdgeEnd(
+                    finishEdgeIndex,
+                    chainA.vertices.back(),
+                    chainB.vertices.back(),
+                    shortEndScores[static_cast<std::size_t>(finishEdgeIndex)]);
+                appendCandidate(chainA, chainB, startEnd, finishEnd);
             }
         }
     }
@@ -929,6 +1260,113 @@ bool HealClosedNarrowGap::evaluateBidirectionalGap(
     return true;
 }
 
+bool HealClosedNarrowGap::isCandidateEndConsistent(
+    const GapEnd& end,
+    const TopoDS_Vertex& vertexA,
+    const TopoDS_Vertex& vertexB) const
+{
+    if (vertexA.IsNull() || vertexB.IsNull() ||
+        end.vertexA.IsNull() || end.vertexB.IsNull() ||
+        !end.vertexA.IsSame(vertexA) ||
+        !end.vertexB.IsSame(vertexB)) {
+        return false;
+    }
+
+    if (end.type == GapEndType::SharedTip) {
+        return vertexA.IsSame(vertexB) && end.connectorEdge.IsNull();
+    }
+    if (end.type != GapEndType::ShortEdge ||
+        vertexA.IsSame(vertexB) ||
+        end.connectorEdge.IsNull() ||
+        end.connectorOwnerFace.IsNull()) {
+        return false;
+    }
+
+    TopoDS_Vertex connectorFirst;
+    TopoDS_Vertex connectorLast;
+    if (!getEdgeVertices(
+            end.connectorEdge,
+            connectorFirst,
+            connectorLast)) {
+        return false;
+    }
+    return (connectorFirst.IsSame(vertexA) &&
+            connectorLast.IsSame(vertexB)) ||
+        (connectorFirst.IsSame(vertexB) &&
+            connectorLast.IsSame(vertexA));
+}
+
+bool HealClosedNarrowGap::buildTargetEndVertex(
+    const GapEnd& end,
+    TopoDS_Vertex& targetVertex,
+    std::string& errorMessage) const
+{
+    targetVertex.Nullify();
+    if (end.vertexA.IsNull() || end.vertexB.IsNull()) {
+        errorMessage = "target endpoint construction failure: source endpoint is null";
+        return false;
+    }
+
+    if (end.type == GapEndType::SharedTip) {
+        if (!end.vertexA.IsSame(end.vertexB) || !end.connectorEdge.IsNull()) {
+            errorMessage = "target endpoint construction failure: shared tip topology is inconsistent";
+            return false;
+        }
+        targetVertex = end.vertexA;
+        return true;
+    }
+    if (end.type != GapEndType::ShortEdge ||
+        end.vertexA.IsSame(end.vertexB) ||
+        end.connectorEdge.IsNull() ||
+        end.connectorOwnerFace.IsNull()) {
+        errorMessage = "target endpoint construction failure: short end edge topology is inconsistent";
+        return false;
+    }
+
+    try {
+        const gp_Pnt pointA = BRep_Tool::Pnt(end.vertexA);
+        const gp_Pnt pointB = BRep_Tool::Pnt(end.vertexB);
+        if (!isFinitePoint(pointA) || !isFinitePoint(pointB)) {
+            errorMessage = "target endpoint construction failure: short end edge has a non-finite endpoint";
+            return false;
+        }
+
+        const gp_Pnt midpoint(
+            0.5 * (pointA.X() + pointB.X()),
+            0.5 * (pointA.Y() + pointB.Y()),
+            0.5 * (pointA.Z() + pointB.Z()));
+        if (!isFinitePoint(midpoint)) {
+            errorMessage = "target endpoint construction failure: short end midpoint is not finite";
+            return false;
+        }
+
+        // 两个短边端点都会替换为同一个 vertex，容差只覆盖已有误差和实际移动距离。
+        // 不能混入 face/pcurve 修复容差，否则后续组 wire 时可能把附近的其他顶点误认为连接点。
+        const double vertexTolerance = std::max({
+            Precision::Confusion(),
+            BRep_Tool::Tolerance(end.vertexA),
+            BRep_Tool::Tolerance(end.vertexB),
+            BRep_Tool::Tolerance(end.connectorEdge),
+            pointA.Distance(midpoint) + Precision::Confusion(),
+            pointB.Distance(midpoint) + Precision::Confusion()
+        });
+
+        BRep_Builder builder;
+        builder.MakeVertex(targetVertex, midpoint, vertexTolerance);
+        if (targetVertex.IsNull()) {
+            errorMessage = "target endpoint construction failure: failed to create short end midpoint vertex";
+            return false;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "target endpoint construction failure: "
+            + failureText(failure);
+        return false;
+    }
+
+    return true;
+}
+
 bool HealClosedNarrowGap::buildMidlineChain(
     const ClosedGapCandidate& candidate,
     MidlineChainData& midlineData,
@@ -956,9 +1394,15 @@ bool HealClosedNarrowGap::buildMidlineChain(
         errorMessage = "candidate chain total length is invalid";
         return false;
     }
-    if (!candidate.chainA.vertices.front().IsSame(candidate.chainB.vertices.front()) ||
-        !candidate.chainA.vertices.back().IsSame(candidate.chainB.vertices.back())) {
-        errorMessage = "candidate chains do not share the same endpoints";
+    if (!isCandidateEndConsistent(
+            candidate.startEnd,
+            candidate.chainA.vertices.front(),
+            candidate.chainB.vertices.front()) ||
+        !isCandidateEndConsistent(
+            candidate.finishEnd,
+            candidate.chainA.vertices.back(),
+            candidate.chainB.vertices.back())) {
+        errorMessage = "candidate chain endpoints do not match their endpoint definitions";
         return false;
     }
     for (const TopoDS_Face& ownerFace : candidate.chainA.ownerFaces) {
@@ -1001,7 +1445,10 @@ bool HealClosedNarrowGap::buildMidlineChain(
 bool HealClosedNarrowGap::canUseLegacyOneToOnePath(
     const ClosedGapCandidate& candidate) const
 {
-    if (candidate.chainA.edges.size() != candidate.chainB.edges.size() ||
+    // Legacy 路径保留原有语义，只处理两侧共享两个尖点的对称拓扑。
+    if (candidate.startEnd.type != GapEndType::SharedTip ||
+        candidate.finishEnd.type != GapEndType::SharedTip ||
+        candidate.chainA.edges.size() != candidate.chainB.edges.size() ||
         candidate.chainA.vertices.size() != candidate.chainB.vertices.size() ||
         candidate.chainA.vertices.size() != candidate.chainA.edges.size() + 1) {
         return false;
@@ -2175,15 +2622,27 @@ bool HealClosedNarrowGap::buildProjectionTargetVertices(
              nodeIndex < nodes.size();
              ++nodeIndex) {
             if (nodeIndex == 0) {
-                midlineData.chain.vertices.push_back(
-                    candidate.chainA.vertices.front());
+                TopoDS_Vertex targetStart;
+                if (!buildTargetEndVertex(
+                        candidate.startEnd,
+                        targetStart,
+                        errorMessage)) {
+                    return false;
+                }
+                midlineData.chain.vertices.push_back(targetStart);
                 midlineData.targetVertexIndicesForChainA.front() = 0;
                 midlineData.targetVertexIndicesForChainB.front() = 0;
                 continue;
             }
             if (nodeIndex + 1 == nodes.size()) {
-                midlineData.chain.vertices.push_back(
-                    candidate.chainA.vertices.back());
+                TopoDS_Vertex targetFinish;
+                if (!buildTargetEndVertex(
+                        candidate.finishEnd,
+                        targetFinish,
+                        errorMessage)) {
+                    return false;
+                }
+                midlineData.chain.vertices.push_back(targetFinish);
                 midlineData.targetVertexIndicesForChainA.back() =
                     nodeIndex;
                 midlineData.targetVertexIndicesForChainB.back() =
@@ -2925,6 +3384,18 @@ const char* HealClosedNarrowGap::midlineConstructionModeName(
     }
 }
 
+const char* HealClosedNarrowGap::gapEndTypeName(GapEndType type)
+{
+    switch (type) {
+    case GapEndType::SharedTip:
+        return "SharedTip";
+    case GapEndType::ShortEdge:
+        return "ShortEdge";
+    default:
+        return "Unknown";
+    }
+}
+
 bool HealClosedNarrowGap::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
     const ClosedGapCandidate& candidate,
@@ -2943,32 +3414,68 @@ bool HealClosedNarrowGap::tryRepairCandidate(
             return true;
         }
 
-        if (!params_.fallbackToSideReplacement) {
-            errorMessage = "Closed narrow gap repair failed:\n"
-                + RepairDiagnostics::IndentMultiline(
-                    RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ");
-            return false;
+        std::string deleteAndFillError;
+        if (params_.useDeleteAndFillDefectiveFace) {
+            if (tryRepairByDeletingAndFillingDefectiveFace(
+                    currentShape,
+                    candidate,
+                    repairedShape,
+                    deleteAndFillError)) {
+                appendMessage(
+                    "Warning: repaired by DeleteAndFillDefectiveFace after earlier strategy failed:\n"
+                    + RepairDiagnostics::IndentMultiline(
+                        RepairDiagnostics::StrategyFailureBlock(
+                            "MidlineCollapse",
+                            midlineError),
+                        "  "));
+                return true;
+            }
+        }
+        else {
+            deleteAndFillError = "strategy is disabled";
         }
 
         std::string sideError;
-        const bool asymmetricSourceChains =
-            candidate.chainA.edges.size() != candidate.chainB.edges.size();
-        if (asymmetricSourceChains) {
-            sideError =
-                "candidate uses asymmetric source chains; "
-                "midline collapse is disabled or failed; "
-                "legacy side replacement only supports one-to-one source edge replacement";
+        if (params_.fallbackToSideReplacement) {
+            const bool hasShortEdgeEnd =
+                candidate.startEnd.type == GapEndType::ShortEdge ||
+                candidate.finishEnd.type == GapEndType::ShortEdge;
+            const bool asymmetricSourceChains =
+                candidate.chainA.edges.size() != candidate.chainB.edges.size();
+            if (hasShortEdgeEnd) {
+                sideError =
+                    "candidate contains a short edge endpoint; "
+                    "side replacement cannot collapse and remove endpoint connector edges";
+            }
+            else if (asymmetricSourceChains) {
+                sideError =
+                    "candidate uses asymmetric source chains; "
+                    "midline collapse is disabled or failed; "
+                    "legacy side replacement only supports one-to-one source edge replacement";
+            }
+            else if (tryRepairBySideReplacement(
+                         currentShape,
+                         candidate,
+                         repairedShape,
+                         sideError)) {
+                appendMessage(
+                    "Warning: repaired by side replacement after earlier strategies failed:\n"
+                    + RepairDiagnostics::IndentMultiline(
+                        RepairDiagnostics::StrategyFailureBlock(
+                            "MidlineCollapse",
+                            midlineError),
+                        "  ")
+                    + "\n"
+                    + RepairDiagnostics::IndentMultiline(
+                        RepairDiagnostics::StrategyFailureBlock(
+                            "DeleteAndFillDefectiveFace",
+                            deleteAndFillError),
+                        "  "));
+                return true;
+            }
         }
-        else if (tryRepairBySideReplacement(
-                     currentShape,
-                     candidate,
-                     repairedShape,
-                     sideError)) {
-            appendMessage(
-                "Warning: repaired by side replacement after earlier strategy failed:\n"
-                + RepairDiagnostics::IndentMultiline(
-                    RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  "));
-            return true;
+        else {
+            sideError = "strategy is disabled";
         }
 
         errorMessage = "Closed narrow gap repair failed:\n"
@@ -2976,11 +3483,28 @@ bool HealClosedNarrowGap::tryRepairCandidate(
                 RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ")
             + "\n"
             + RepairDiagnostics::IndentMultiline(
+                RepairDiagnostics::StrategyFailureBlock(
+                    "DeleteAndFillDefectiveFace",
+                    deleteAndFillError),
+                "  ")
+            + "\n"
+            + RepairDiagnostics::IndentMultiline(
                 RepairDiagnostics::StrategyFailureBlock("SideReplacement", sideError), "  ");
         return false;
     }
 
-    return tryRepairBySideReplacement(currentShape, candidate, repairedShape, errorMessage);
+    if (candidate.startEnd.type == GapEndType::ShortEdge ||
+        candidate.finishEnd.type == GapEndType::ShortEdge) {
+        errorMessage =
+            "candidate contains a short edge endpoint; "
+            "midline collapse is required to remove endpoint connector edges";
+        return false;
+    }
+    return tryRepairBySideReplacement(
+        currentShape,
+        candidate,
+        repairedShape,
+        errorMessage);
 }
 
 bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
@@ -3131,7 +3655,20 @@ bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
             : "Midline adjacency before validation (final ShapeFix disabled): ")
         + describeEdgeFaceCounts(trialShape, midlineData.chain.edges));
 
-    if (!validateRepairResult(currentShape, trialShape, midlineData.chain, freeEdgesBefore, errorMessage)) {
+    std::vector<TopoDS_Edge> removedEndpointEdges;
+    if (candidate.startEnd.type == GapEndType::ShortEdge) {
+        removedEndpointEdges.push_back(candidate.startEnd.connectorEdge);
+    }
+    if (candidate.finishEnd.type == GapEndType::ShortEdge) {
+        removedEndpointEdges.push_back(candidate.finishEnd.connectorEdge);
+    }
+    if (!validateRepairResult(
+            currentShape,
+            trialShape,
+            midlineData.chain,
+            removedEndpointEdges,
+            freeEdgesBefore,
+            errorMessage)) {
         return false;
     }
 
@@ -3142,6 +3679,788 @@ bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
            << ", midlineLength=" << midlineData.chain.length
            << ", repairTolerance=" << params_.midlineRepairTolerance;
         appendMessage(os.str());
+    }
+    repairedShape = trialShape;
+    return true;
+}
+
+bool HealClosedNarrowGap::buildDeleteAndFillPlan(
+    const TopoDS_Shape& currentShape,
+    const ClosedGapCandidate& candidate,
+    DeleteAndFillPlan& plan,
+    std::string& errorMessage) const
+{
+    plan = DeleteAndFillPlan();
+    if (currentShape.IsNull()) {
+        errorMessage = "current shape is null";
+        return false;
+    }
+
+    std::vector<TopoDS_Face> relatedFaces;
+    auto addRelatedFace = [&](const TopoDS_Face& face) {
+        if (!face.IsNull() && !isSameFaceInVector(relatedFaces, face)) {
+            relatedFaces.push_back(face);
+        }
+    };
+    for (const TopoDS_Face& face : candidate.chainA.ownerFaces) {
+        addRelatedFace(face);
+    }
+    for (const TopoDS_Face& face : candidate.chainB.ownerFaces) {
+        addRelatedFace(face);
+    }
+    addRelatedFace(candidate.startEnd.connectorOwnerFace);
+    addRelatedFace(candidate.finishEnd.connectorOwnerFace);
+
+    auto chainIsEntirelyOwnedBy = [](const EdgeChain& chain, const TopoDS_Face& face) {
+        if (chain.edges.empty() || chain.ownerFaces.size() != chain.edges.size()) {
+            return false;
+        }
+        for (const TopoDS_Face& ownerFace : chain.ownerFaces) {
+            if (ownerFace.IsNull() || !ownerFace.IsSame(face)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto chainUsesFace = [](const EdgeChain& chain, const TopoDS_Face& face) {
+        for (const TopoDS_Face& ownerFace : chain.ownerFaces) {
+            if (!ownerFace.IsNull() && ownerFace.IsSame(face)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 只选择候选相关且确实存在 WireExplorer 遗漏的 face，避免重建正常 face。
+    int bestTraversalMismatch = 0;
+    bool sourceIsChainA = false;
+    for (const TopoDS_Face& relatedFace : relatedFaces) {
+        const bool ownsChainA = chainIsEntirelyOwnedBy(candidate.chainA, relatedFace);
+        const bool ownsChainB = chainIsEntirelyOwnedBy(candidate.chainB, relatedFace);
+        const bool canReplaceChainA = ownsChainA && !chainUsesFace(candidate.chainB, relatedFace);
+        const bool canReplaceChainB = ownsChainB && !chainUsesFace(candidate.chainA, relatedFace);
+        if (canReplaceChainA == canReplaceChainB) {
+            continue;
+        }
+
+        TopoDS_Face forwardFace = relatedFace;
+        forwardFace.Orientation(TopAbs_FORWARD);
+        int traversalMismatch = 0;
+        for (TopExp_Explorer wireExplorer(forwardFace, TopAbs_WIRE);
+             wireExplorer.More();
+             wireExplorer.Next()) {
+            const TopoDS_Wire wire = TopoDS::Wire(wireExplorer.Current());
+            std::vector<TopoDS_Edge> directUses;
+            for (TopoDS_Iterator directIterator(wire, Standard_False, Standard_False);
+                 directIterator.More();
+                 directIterator.Next()) {
+                if (directIterator.Value().ShapeType() == TopAbs_EDGE) {
+                    directUses.push_back(TopoDS::Edge(directIterator.Value()));
+                }
+            }
+
+            std::vector<bool> matchedDirectUses(directUses.size(), false);
+            int unexpectedExploredUses = 0;
+            for (BRepTools_WireExplorer edgeExplorer(wire, forwardFace);
+                 edgeExplorer.More();
+                 edgeExplorer.Next()) {
+                const TopoDS_Edge exploredEdge = edgeExplorer.Current();
+                bool matched = false;
+                for (std::size_t directIndex = 0;
+                     directIndex < directUses.size();
+                     ++directIndex) {
+                    if (!matchedDirectUses[directIndex] &&
+                        directUses[directIndex].IsSame(exploredEdge)) {
+                        matchedDirectUses[directIndex] = true;
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    ++unexpectedExploredUses;
+                }
+            }
+
+            traversalMismatch += unexpectedExploredUses;
+            traversalMismatch += static_cast<int>(std::count(
+                matchedDirectUses.begin(),
+                matchedDirectUses.end(),
+                false));
+        }
+
+        if (traversalMismatch > bestTraversalMismatch) {
+            bestTraversalMismatch = traversalMismatch;
+            plan.defectiveFace = relatedFace;
+            sourceIsChainA = canReplaceChainA;
+        }
+    }
+
+    if (plan.defectiveFace.IsNull() || bestTraversalMismatch <= 0) {
+        errorMessage =
+            "no candidate-related face has both an incomplete wire traversal and one complete source chain";
+        return false;
+    }
+    plan.missingWireEdgeUses = bestTraversalMismatch;
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
+
+    auto findOtherFaces = [&](const TopoDS_Edge& edge) {
+        std::vector<TopoDS_Face> otherFaces;
+        if (edge.IsNull() || !edgeFaceMap.Contains(edge)) {
+            return otherFaces;
+        }
+        const TopTools_ListOfShape& adjacentFaces = edgeFaceMap.FindFromKey(edge);
+        for (TopTools_ListIteratorOfListOfShape faceIterator(adjacentFaces);
+             faceIterator.More();
+             faceIterator.Next()) {
+            const TopoDS_Face adjacentFace = TopoDS::Face(faceIterator.Value());
+            if (adjacentFace.IsNull() || adjacentFace.IsSame(plan.defectiveFace) ||
+                isSameFaceInVector(otherFaces, adjacentFace)) {
+                continue;
+            }
+            otherFaces.push_back(adjacentFace);
+        }
+        return otherFaces;
+    };
+
+    std::vector<TopoDS_Edge> unorderedBoundaryEdges;
+    auto addBoundaryEdge = [&](const TopoDS_Edge& edge) {
+        if (!edge.IsNull() && !isSameEdgeInVector(unorderedBoundaryEdges, edge)) {
+            unorderedBoundaryEdges.push_back(edge);
+        }
+    };
+    auto addRemovedEdge = [&](const TopoDS_Edge& edge) {
+        if (!edge.IsNull() && !isSameEdgeInVector(plan.removedEdges, edge)) {
+            plan.removedEdges.push_back(edge);
+        }
+    };
+
+    TopoDS_Face forwardDefectiveFace = plan.defectiveFace;
+    forwardDefectiveFace.Orientation(TopAbs_FORWARD);
+    std::vector<TopoDS_Edge> defectiveFaceEdges;
+    for (TopExp_Explorer wireExplorer(forwardDefectiveFace, TopAbs_WIRE);
+         wireExplorer.More();
+         wireExplorer.Next()) {
+        const TopoDS_Wire wire = TopoDS::Wire(wireExplorer.Current());
+        for (TopoDS_Iterator edgeIterator(wire, Standard_False, Standard_False);
+             edgeIterator.More();
+             edgeIterator.Next()) {
+            if (edgeIterator.Value().ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            const TopoDS_Edge edge = TopoDS::Edge(edgeIterator.Value());
+            if (isSameEdgeInVector(defectiveFaceEdges, edge)) {
+                errorMessage =
+                    "defective face contains a repeated or seam edge use; delete-and-fill requires a simple boundary";
+                return false;
+            }
+            defectiveFaceEdges.push_back(edge);
+
+            if (!edgeFaceMap.Contains(edge)) {
+                errorMessage = "defective face edge is missing from the current edge-face map";
+                return false;
+            }
+            const std::vector<TopoDS_Face> otherFaces = findOtherFaces(edge);
+            if (otherFaces.size() > 1) {
+                errorMessage =
+                    "deleting the defective face would retain a non-manifold boundary edge";
+                return false;
+            }
+            if (otherFaces.empty()) {
+                addRemovedEdge(edge);
+            }
+            else {
+                addBoundaryEdge(edge);
+            }
+        }
+    }
+
+    const EdgeChain& sourceChain = sourceIsChainA
+        ? candidate.chainA
+        : candidate.chainB;
+    const EdgeChain& oppositeChain = sourceIsChainA
+        ? candidate.chainB
+        : candidate.chainA;
+    for (const TopoDS_Edge& sourceEdge : sourceChain.edges) {
+        if (!isSameEdgeInVector(plan.removedEdges, sourceEdge)) {
+            errorMessage =
+                "source chain edge would survive defective face deletion";
+            return false;
+        }
+    }
+
+    // 缝隙另一侧的自由边在删除 face 后仍存在，并成为新补面的替代边界。
+    for (const TopoDS_Edge& oppositeEdge : oppositeChain.edges) {
+        const std::vector<TopoDS_Face> otherFaces = findOtherFaces(oppositeEdge);
+        if (otherFaces.size() != 1) {
+            errorMessage =
+                "opposite chain edge does not have exactly one surviving owner face";
+            return false;
+        }
+        addBoundaryEdge(oppositeEdge);
+    }
+
+    auto addSurvivingConnector = [&](const GapEnd& end) {
+        if (end.type != GapEndType::ShortEdge || end.connectorEdge.IsNull()) {
+            return true;
+        }
+        const std::vector<TopoDS_Face> otherFaces = findOtherFaces(end.connectorEdge);
+        if (otherFaces.empty()) {
+            return true;
+        }
+        if (otherFaces.size() != 1) {
+            errorMessage =
+                "short endpoint connector has ambiguous surviving owner faces";
+            return false;
+        }
+        addBoundaryEdge(end.connectorEdge);
+        return true;
+    };
+    if (!addSurvivingConnector(candidate.startEnd) ||
+        !addSurvivingConnector(candidate.finishEnd)) {
+        return false;
+    }
+
+    if (unorderedBoundaryEdges.size() < 3) {
+        errorMessage = "delete-and-fill boundary has fewer than three edges";
+        return false;
+    }
+
+    struct BoundaryLink {
+        TopoDS_Edge edge;
+        TopoDS_Vertex firstVertex;
+        TopoDS_Vertex lastVertex;
+        int firstIndex = 0;
+        int lastIndex = 0;
+    };
+    TopTools_IndexedMapOfShape boundaryVertices;
+    std::vector<BoundaryLink> links;
+    links.reserve(unorderedBoundaryEdges.size());
+    for (const TopoDS_Edge& edge : unorderedBoundaryEdges) {
+        BoundaryLink link;
+        link.edge = edge;
+        if (!getEdgeVertices(edge, link.firstVertex, link.lastVertex) ||
+            link.firstVertex.IsSame(link.lastVertex)) {
+            errorMessage =
+                "delete-and-fill boundary contains an invalid or closed single edge";
+            return false;
+        }
+        link.firstIndex = boundaryVertices.Add(link.firstVertex);
+        link.lastIndex = boundaryVertices.Add(link.lastVertex);
+        links.push_back(link);
+    }
+
+    std::vector<std::vector<std::size_t>> incidentLinks(
+        static_cast<std::size_t>(boundaryVertices.Extent() + 1));
+    for (std::size_t linkIndex = 0; linkIndex < links.size(); ++linkIndex) {
+        incidentLinks[static_cast<std::size_t>(links[linkIndex].firstIndex)].push_back(linkIndex);
+        incidentLinks[static_cast<std::size_t>(links[linkIndex].lastIndex)].push_back(linkIndex);
+    }
+    for (int vertexIndex = 1; vertexIndex <= boundaryVertices.Extent(); ++vertexIndex) {
+        const std::size_t degree =
+            incidentLinks[static_cast<std::size_t>(vertexIndex)].size();
+        if (degree != 2) {
+            std::ostringstream message;
+            message << "surviving boundary is not one unbranched loop: vertexDegree="
+                    << degree << ", expected=2";
+            errorMessage = message.str();
+            return false;
+        }
+    }
+
+    std::vector<bool> usedLinks(links.size(), false);
+    TopoDS_Vertex loopStart = links.front().firstVertex;
+    TopoDS_Vertex currentVertex = loopStart;
+    plan.boundary.vertices.push_back(loopStart);
+    for (std::size_t step = 0; step < links.size(); ++step) {
+        const int currentVertexIndex = boundaryVertices.FindIndex(currentVertex);
+        if (currentVertexIndex <= 0) {
+            errorMessage = "failed to locate the current boundary vertex";
+            return false;
+        }
+
+        std::size_t nextLinkIndex = links.size();
+        if (step == 0) {
+            // 闭环起点天然有两个方向，固定从第一条边开始即可消除该二义性。
+            nextLinkIndex = 0;
+        }
+        else {
+            for (const std::size_t incidentLinkIndex :
+                 incidentLinks[static_cast<std::size_t>(currentVertexIndex)]) {
+                if (!usedLinks[incidentLinkIndex]) {
+                    if (nextLinkIndex != links.size()) {
+                        errorMessage =
+                            "surviving boundary traversal has more than one next edge";
+                        return false;
+                    }
+                    nextLinkIndex = incidentLinkIndex;
+                }
+            }
+        }
+        if (nextLinkIndex == links.size()) {
+            errorMessage = "surviving boundary traversal ended before using every edge";
+            return false;
+        }
+
+        const BoundaryLink& link = links[nextLinkIndex];
+        TopoDS_Vertex nextVertex;
+        if (link.firstVertex.IsSame(currentVertex)) {
+            nextVertex = link.lastVertex;
+        }
+        else if (link.lastVertex.IsSame(currentVertex)) {
+            nextVertex = link.firstVertex;
+        }
+        else {
+            errorMessage = "selected boundary edge is not incident to the current vertex";
+            return false;
+        }
+
+        plan.boundary.edges.push_back(
+            orientEdgeFromTo(link.edge, currentVertex, nextVertex));
+        plan.boundary.vertices.push_back(nextVertex);
+        plan.boundary.length += GeometryUtils::ComputeEdgeLength(link.edge);
+        usedLinks[nextLinkIndex] = true;
+        currentVertex = nextVertex;
+    }
+
+    if (!currentVertex.IsSame(loopStart) ||
+        std::find(usedLinks.begin(), usedLinks.end(), false) != usedLinks.end()) {
+        errorMessage =
+            "surviving boundary contains multiple loops or is not topologically closed";
+        return false;
+    }
+
+    for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+        const std::vector<TopoDS_Face> otherFaces = findOtherFaces(boundaryEdge);
+        if (otherFaces.size() != 1) {
+            errorMessage =
+                "ordered boundary edge does not have exactly one surviving owner face";
+            return false;
+        }
+        plan.boundary.ownerFaces.push_back(otherFaces.front());
+    }
+    return true;
+}
+
+bool HealClosedNarrowGap::buildDeleteAndFillPatchFace(
+    const DeleteAndFillPlan& plan,
+    TopoDS_Face& patchFace,
+    double& g0Error,
+    std::string& errorMessage) const
+{
+    patchFace.Nullify();
+    g0Error = 0.0;
+    if (plan.boundary.edges.size() < 3 ||
+        plan.boundary.vertices.size() != plan.boundary.edges.size() + 1 ||
+        !plan.boundary.vertices.front().IsSame(plan.boundary.vertices.back())) {
+        errorMessage = "delete-and-fill boundary is not a valid closed chain";
+        return false;
+    }
+
+    try {
+        BRepFill_Filling filling;
+        filling.SetResolParam(
+            params_.deleteAndFillDegree,
+            params_.deleteAndFillPointsOnCurve,
+            params_.deleteAndFillIterations,
+            Standard_False);
+        filling.SetConstrParam(
+            params_.deleteAndFillTolerance,
+            params_.deleteAndFillTolerance,
+            1.0e-2,
+            1.0e-1);
+        filling.SetApproxParam(
+            params_.deleteAndFillMaxDegree,
+            params_.deleteAndFillMaxSegments);
+
+        // 直接以删除后留下的三维边界拟合新曲面，不使用旧 face 的 surface。
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            filling.Add(boundaryEdge, GeomAbs_C0, Standard_True);
+        }
+        filling.Build();
+        if (!filling.IsDone()) {
+            errorMessage = "BRepFill_Filling did not build a replacement face";
+            return false;
+        }
+
+        const TopoDS_Face temporaryFillingFace = filling.Face();
+        if (temporaryFillingFace.IsNull()) {
+            errorMessage = "BRepFill_Filling returned a null replacement face";
+            return false;
+        }
+        g0Error = filling.G0Error();
+        if (!std::isfinite(g0Error) ||
+            g0Error > params_.deleteAndFillMaxG0Error) {
+            std::ostringstream message;
+            message << "delete-and-fill boundary G0 error is too large: error="
+                    << g0Error
+                    << ", maximum=" << params_.deleteAndFillMaxG0Error;
+            errorMessage = message.str();
+            return false;
+        }
+
+        const Handle(Geom_Surface) locatedFillingSurface =
+            BRep_Tool::Surface(temporaryFillingFace);
+        if (locatedFillingSurface.IsNull()) {
+            errorMessage = "delete-and-fill replacement face has no support surface";
+            return false;
+        }
+        if (Handle(Geom_BSplineSurface)::DownCast(locatedFillingSurface).IsNull()) {
+            errorMessage =
+                "DeleteAndFillDefectiveFace did not produce a B-spline support surface";
+            return false;
+        }
+
+        double pcurveTolerance = std::max(
+            params_.deleteAndFillTolerance,
+            std::max(g0Error, Precision::Confusion()));
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            pcurveTolerance = std::max(
+                pcurveTolerance,
+                BRep_Tool::Tolerance(boundaryEdge));
+        }
+
+        BRep_Builder builder;
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            Standard_Real firstParameter = 0.0;
+            Standard_Real lastParameter = 0.0;
+            Handle(Geom_Curve) curve3d =
+                BRep_Tool::Curve(boundaryEdge, firstParameter, lastParameter);
+            if (curve3d.IsNull() ||
+                !std::isfinite(firstParameter) ||
+                !std::isfinite(lastParameter) ||
+                lastParameter - firstParameter <= Precision::PConfusion()) {
+                errorMessage =
+                    "surviving boundary edge has no valid 3d curve range";
+                return false;
+            }
+
+            // 由原 3D 参数直接投影得到 same-parameter PCurve，避免 FixAddPCurve
+            // 对新拟合 surface 只得到“非空但参数不一致”的二维曲线。
+            ShapeConstruct_ProjectCurveOnSurface projector;
+            projector.Init(locatedFillingSurface, pcurveTolerance);
+            Handle(Geom2d_Curve) projectedPCurve;
+            if (!projector.Perform(
+                    curve3d,
+                    firstParameter,
+                    lastParameter,
+                    projectedPCurve) &&
+                !projector.PerformByProjLib(
+                    curve3d,
+                    firstParameter,
+                    lastParameter,
+                    projectedPCurve)) {
+                errorMessage =
+                    "failed to project a surviving boundary edge onto the filling surface";
+                return false;
+            }
+            if (projectedPCurve.IsNull()) {
+                errorMessage =
+                    "boundary projection returned a null pcurve";
+                return false;
+            }
+
+            builder.UpdateEdge(
+                boundaryEdge,
+                projectedPCurve,
+                locatedFillingSurface,
+                TopLoc_Location(),
+                pcurveTolerance);
+            builder.Range(
+                boundaryEdge,
+                locatedFillingSurface,
+                TopLoc_Location(),
+                firstParameter,
+                lastParameter);
+        }
+
+        TopoDS_Wire boundaryWire;
+        builder.MakeWire(boundaryWire);
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            builder.Add(boundaryWire, boundaryEdge);
+        }
+        boundaryWire.Closed(Standard_True);
+
+        // Filling 只提供新 surface；最终 face 必须显式复用删除后留下的原 edge TShape。
+        builder.MakeFace(
+            patchFace,
+            locatedFillingSurface,
+            TopLoc_Location(),
+            pcurveTolerance);
+        patchFace.Orientation(TopAbs_FORWARD);
+        builder.Add(patchFace, boundaryWire);
+        builder.UpdateFace(patchFace, pcurveTolerance);
+
+        // Filling 的 G0Error 针对其内部边界；最终复用原 edge 后必须重新测量真实偏差。
+        double measuredTolerance = pcurveTolerance;
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            BRepLib_CheckCurveOnSurface checker(boundaryEdge, patchFace);
+            checker.Perform();
+            if (!checker.IsDone() || !std::isfinite(checker.MaxDistance())) {
+                errorMessage =
+                    "failed to measure delete-and-fill boundary deviation";
+                return false;
+            }
+
+            const double existingEdgeTolerance =
+                BRep_Tool::Tolerance(boundaryEdge);
+            const double requiredEdgeTolerance = std::max(
+                existingEdgeTolerance,
+                checker.MaxDistance() + Precision::Confusion());
+            const double allowedEdgeTolerance = std::max(
+                existingEdgeTolerance,
+                params_.deleteAndFillMaxG0Error);
+            if (requiredEdgeTolerance > allowedEdgeTolerance) {
+                std::ostringstream message;
+                message << "rebuilt boundary deviation exceeds delete-and-fill tolerance: required="
+                        << requiredEdgeTolerance
+                        << ", maximum=" << allowedEdgeTolerance;
+                errorMessage = message.str();
+                return false;
+            }
+
+            builder.UpdateEdge(boundaryEdge, requiredEdgeTolerance);
+            measuredTolerance = std::max(
+                measuredTolerance,
+                requiredEdgeTolerance);
+        }
+        pcurveTolerance = measuredTolerance;
+        builder.UpdateFace(patchFace, pcurveTolerance);
+
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            TopoDS_Edge boundaryUse = boundaryEdge;
+            std::string pcurveError;
+            if (!GeometryUtils::RepairPCurveForEdgeOnFace(
+                    boundaryUse,
+                    patchFace,
+                    pcurveTolerance,
+                    &pcurveError)) {
+                errorMessage =
+                    "failed to prepare pcurve on delete-and-fill face: "
+                    + pcurveError;
+                return false;
+            }
+            if (!boundaryUse.IsSame(boundaryEdge)) {
+                errorMessage =
+                    "pcurve repair changed a surviving boundary edge identity";
+                return false;
+            }
+        }
+
+        TopTools_IndexedMapOfShape patchEdges;
+        TopExp::MapShapes(patchFace, TopAbs_EDGE, patchEdges);
+        if (patchEdges.Extent() != static_cast<int>(plan.boundary.edges.size())) {
+            errorMessage =
+                "rebuilt face boundary edge count differs from the surviving loop";
+            return false;
+        }
+        for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
+            bool edgeWasReused = false;
+            for (int edgeIndex = 1; edgeIndex <= patchEdges.Extent(); ++edgeIndex) {
+                if (patchEdges.FindKey(edgeIndex).IsSame(boundaryEdge)) {
+                    edgeWasReused = true;
+                    break;
+                }
+            }
+            if (!edgeWasReused) {
+                errorMessage =
+                    "rebuilt face did not reuse every surviving boundary edge";
+                return false;
+            }
+        }
+
+        BRepCheck_Analyzer faceAnalyzer(patchFace, Standard_True);
+        if (!faceAnalyzer.IsValid()) {
+            // 同一闭环的另一侧可能相对拟合 surface 采用相反环向；只整体反转 wire，
+            // 不改变任何边界 edge TShape，再重新检查 face。
+            TopoDS_Wire reversedBoundaryWire = boundaryWire;
+            reversedBoundaryWire.Reverse();
+            TopoDS_Face reversedPatchFace;
+            builder.MakeFace(
+                reversedPatchFace,
+                locatedFillingSurface,
+                TopLoc_Location(),
+                pcurveTolerance);
+            reversedPatchFace.Orientation(TopAbs_FORWARD);
+            builder.Add(reversedPatchFace, reversedBoundaryWire);
+            builder.UpdateFace(reversedPatchFace, pcurveTolerance);
+
+            BRepCheck_Analyzer reversedAnalyzer(
+                reversedPatchFace,
+                Standard_True);
+            if (!reversedAnalyzer.IsValid()) {
+                errorMessage = "delete-and-fill replacement face is invalid after trying both wire orientations: "
+                    + RepairDiagnostics::DescribeBRepCheckFailures(
+                        reversedAnalyzer,
+                        reversedPatchFace);
+                return false;
+            }
+            patchFace = reversedPatchFace;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage =
+            "OCCT failure while building DeleteAndFillDefectiveFace patch: "
+            + failureText(failure);
+        return false;
+    }
+    return true;
+}
+
+bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
+    const TopoDS_Shape& currentShape,
+    const ClosedGapCandidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    DeleteAndFillPlan plan;
+    if (!buildDeleteAndFillPlan(
+            currentShape,
+            candidate,
+            plan,
+            errorMessage)) {
+        return false;
+    }
+
+    {
+        std::ostringstream message;
+        message << "DeleteAndFillDefectiveFace plan: missingWireEdgeUses="
+                << plan.missingWireEdgeUses
+                << ", boundaryEdges=" << plan.boundary.edges.size()
+                << ", removedEdges=" << plan.removedEdges.size();
+        appendMessage(message.str());
+    }
+
+    TopoDS_Face patchFace;
+    double g0Error = 0.0;
+    if (!buildDeleteAndFillPatchFace(
+            plan,
+            patchFace,
+            g0Error,
+            errorMessage)) {
+        return false;
+    }
+
+    const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
+    TopoDS_Shape trialShape;
+    TopoDS_Shape locallyReplacedShape;
+    try {
+        // 规范化 Replace 的键和值，让 ReShape 按原 face use 传递局部方向。
+        TopoDS_Face sourceKey = plan.defectiveFace;
+        sourceKey.Orientation(TopAbs_FORWARD);
+        TopoDS_Face replacementValue = patchFace;
+        replacementValue.Orientation(TopAbs_FORWARD);
+
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(sourceKey, replacementValue);
+        trialShape = reshaper.Apply(currentShape);
+        if (trialShape.IsNull()) {
+            errorMessage =
+                "replacing the defective face produced a null shape";
+            return false;
+        }
+        locallyReplacedShape = trialShape;
+
+        appendMessage(
+            "DeleteAndFill adjacency after local face replacement: "
+            + describeEdgeFaceCounts(
+                locallyReplacedShape,
+                plan.boundary.edges));
+
+        if (params_.runShapeFixAfterRepair) {
+            ShapeFix_Shape fixer(trialShape);
+            const double fixPrecision = std::max(
+                Precision::Confusion(),
+                params_.deleteAndFillTolerance);
+            fixer.SetPrecision(fixPrecision);
+            fixer.SetMaxTolerance(std::max(
+                fixPrecision,
+                params_.deleteAndFillMaxG0Error));
+            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+            fixer.Perform();
+            const TopoDS_Shape fixedShape = fixer.Shape();
+            if (!fixedShape.IsNull()) {
+                trialShape = fixedShape;
+            }
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage =
+            "OCCT failure while replacing the defective face: "
+            + failureText(failure);
+        return false;
+    }
+
+    appendMessage(
+        std::string(params_.runShapeFixAfterRepair
+            ? "DeleteAndFill adjacency after final ShapeFix: "
+            : "DeleteAndFill adjacency before validation: ")
+        + describeEdgeFaceCounts(trialShape, plan.boundary.edges));
+
+    auto defectiveFaceWasRemoved = [&](const TopoDS_Shape& shape) {
+        TopTools_IndexedMapOfShape resultFaces;
+        TopExp::MapShapes(shape, TopAbs_FACE, resultFaces);
+        for (int faceIndex = 1; faceIndex <= resultFaces.Extent(); ++faceIndex) {
+            if (resultFaces.FindKey(faceIndex).IsSame(plan.defectiveFace)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!defectiveFaceWasRemoved(trialShape)) {
+        errorMessage = "defective face is still present after replacement";
+        return false;
+    }
+
+    std::string validationError;
+    if (!validateRepairResult(
+            currentShape,
+            trialShape,
+            plan.boundary,
+            plan.removedEdges,
+            freeEdgesBefore,
+            validationError)) {
+        std::string localValidationError;
+        const bool canUseLocalResult =
+            params_.runShapeFixAfterRepair &&
+            !locallyReplacedShape.IsNull() &&
+            !trialShape.IsSame(locallyReplacedShape) &&
+            defectiveFaceWasRemoved(locallyReplacedShape) &&
+            validateRepairResult(
+                currentShape,
+                locallyReplacedShape,
+                plan.boundary,
+                plan.removedEdges,
+                freeEdgesBefore,
+                localValidationError);
+        if (!canUseLocalResult) {
+            errorMessage = validationError;
+            if (!localValidationError.empty()) {
+                errorMessage += "\nlocal replacement validation also failed: "
+                    + localValidationError;
+            }
+            return false;
+        }
+
+        appendMessage(
+            "Warning: final ShapeFix result was rejected; using the validated local DeleteAndFill result: "
+            + validationError);
+        trialShape = locallyReplacedShape;
+    }
+
+    {
+        std::ostringstream message;
+        message << "Candidate repair accepted by DeleteAndFillDefectiveFace: boundaryEdges="
+                << plan.boundary.edges.size()
+                << ", removedEdges=" << plan.removedEdges.size()
+                << ", g0Error=" << g0Error
+                << ", freeEdgesBefore=" << freeEdgesBefore
+                << ", freeEdgesAfter="
+                << TopologyUtils::CountFreeEdges(trialShape);
+        appendMessage(message.str());
     }
     repairedShape = trialShape;
     return true;
@@ -3204,7 +4523,13 @@ bool HealClosedNarrowGap::tryRepairBySideReplacement(
         }
     }
 
-    if (!validateRepairResult(currentShape, trialShape, choice.keptChain, freeEdgesBefore, errorMessage)) {
+    if (!validateRepairResult(
+            currentShape,
+            trialShape,
+            choice.keptChain,
+            std::vector<TopoDS_Edge>(),
+            freeEdgesBefore,
+            errorMessage)) {
         return false;
     }
 
@@ -3376,6 +4701,40 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
         return false;
     }
 
+    auto addEndEdgeRemoval = [&](const GapEnd& end) {
+        if (end.type == GapEndType::SharedTip) {
+            return true;
+        }
+        if (end.type != GapEndType::ShortEdge ||
+            end.connectorEdge.IsNull() ||
+            end.connectorOwnerFace.IsNull()) {
+            errorMessage = "short endpoint removal data is incomplete";
+            return false;
+        }
+
+        FaceReplacementPlan* plan =
+            findOrAddFacePlan(end.connectorOwnerFace);
+        for (const EdgeReplacementTask& edgeTask : plan->edgeTasks) {
+            if (edgeTask.sourceEdge.IsSame(end.connectorEdge)) {
+                errorMessage = "short endpoint edge is also registered as a midline replacement edge";
+                return false;
+            }
+        }
+        for (const TopoDS_Edge& existingEdge : plan->edgesToRemove) {
+            if (existingEdge.IsSame(end.connectorEdge)) {
+                errorMessage = "the same short endpoint edge is registered more than once";
+                return false;
+            }
+        }
+        plan->edgesToRemove.push_back(end.connectorEdge);
+        return true;
+    };
+
+    if (!addEndEdgeRemoval(candidate.startEnd) ||
+        !addEndEdgeRemoval(candidate.finishEnd)) {
+        return false;
+    }
+
     if (facePlans.empty()) {
         errorMessage = "closed-gap chains have no owner faces";
         return false;
@@ -3386,6 +4745,12 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
         BRepTools_ReShape vertexReshaper;
         std::vector<TopoDS_Vertex> replacedSourceVertices;
         TopTools_MapOfShape uniqueSourceVertices;
+        TopTools_MapOfShape endpointEdgesToRemove;
+        for (const FaceReplacementPlan& plan : facePlans) {
+            for (const TopoDS_Edge& edgeToRemove : plan.edgesToRemove) {
+                endpointEdgesToRemove.Add(edgeToRemove);
+            }
+        }
 
         auto registerVertexReplacement = [&](const TopoDS_Vertex& sourceVertex,
                                              const TopoDS_Vertex& midlineVertex) {
@@ -3451,18 +4816,29 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
                     return false;
                 }
 
-                // A、B 两侧内部顶点数量可能不同，分别按各自映射替换，
-                // 不能再假设两侧 source vertex 与 target vertex 使用相同下标。
-                for (std::size_t sourceVertexIndex = 1;
-                     sourceVertexIndex + 1 < sourceChain.vertices.size();
+                // A、B 两侧分别按各自映射替换。共享尖点会因 IsSame 直接跳过，
+                // 短端边的两个端点则会映射到同一个中点 vertex。
+                for (std::size_t sourceVertexIndex = 0;
+                     sourceVertexIndex < sourceChain.vertices.size();
                      ++sourceVertexIndex) {
                     const std::size_t targetVertexIndex =
                         targetVertexIndices[sourceVertexIndex];
                     if (targetVertexIndex ==
                             invalidTargetVertexIndex ||
-                        targetVertexIndex == 0 ||
-                        targetVertexIndex + 1 >=
-                            midlineData.chain.vertices.size()) {
+                        targetVertexIndex >=
+                            midlineData.chain.vertices.size() ||
+                        (sourceVertexIndex == 0 &&
+                            targetVertexIndex != 0) ||
+                        (sourceVertexIndex + 1 ==
+                                sourceChain.vertices.size() &&
+                            targetVertexIndex + 1 !=
+                                midlineData.chain.vertices.size()) ||
+                        (sourceVertexIndex > 0 &&
+                            sourceVertexIndex + 1 <
+                                sourceChain.vertices.size() &&
+                            (targetVertexIndex == 0 ||
+                                targetVertexIndex + 1 >=
+                                    midlineData.chain.vertices.size()))) {
                         errorMessage = std::string(
                             "vertex replacement failure: ")
                             + chainName
@@ -3498,7 +4874,7 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
             return false;
         }
 
-        // 先为所有连接旧内部顶点的 edge 创建唯一替代品，确保相邻 face 继续共享同一 edge TShape。
+        // 先为所有连接待替换旧顶点的 edge 创建唯一替代品，确保相邻 face 继续共享同一 edge TShape。
         TopTools_IndexedDataMapOfShapeListOfShape vertexEdgeMap;
         TopologyUtils::BuildVertexEdgeMap(currentShape, vertexEdgeMap);
         TopTools_MapOfShape transformedEdges;
@@ -3515,6 +4891,9 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
                 if (sourceEdge.IsNull() || !transformedEdges.Add(sourceEdge)) {
                     continue;
                 }
+                if (endpointEdgesToRemove.Contains(sourceEdge)) {
+                    continue;
+                }
 
                 const TopoDS_Shape transformedShape = vertexReshaper.Apply(sourceEdge);
                 if (transformedShape.IsNull() || transformedShape.ShapeType() != TopAbs_EDGE) {
@@ -3527,12 +4906,23 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
             }
         }
 
+        // 短端边收缩为一个 vertex 后不能保留为零长度 edge，必须显式删除。
+        TopTools_MapOfShape removedEndpointEdges;
+        for (const FaceReplacementPlan& plan : facePlans) {
+            for (const TopoDS_Edge& edgeToRemove : plan.edgesToRemove) {
+                if (removedEndpointEdges.Add(edgeToRemove)) {
+                    topologyReshaper.Remove(edgeToRemove);
+                }
+            }
+        }
+
         const double tolerance = std::max(params_.midlineRepairTolerance, Precision::Confusion());
         for (const FaceReplacementPlan& plan : facePlans) {
             TopoDS_Face rebuiltFace;
             if (!rebuildFaceByReplacingMappedEdges(
                     plan.face,
                     plan.edgeTasks,
+                    plan.edgesToRemove,
                     midlineData.chain,
                     topologyReshaper,
                     tolerance,
@@ -3561,6 +4951,7 @@ bool HealClosedNarrowGap::rebuildFacesByCollapsingToMidline(
 bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
     const TopoDS_Face& faceToRebuild,
     const std::vector<EdgeReplacementTask>& edgeTasks,
+    const std::vector<TopoDS_Edge>& edgesToRemove,
     const EdgeChain& midlineChain,
     BRepTools_ReShape& topologyReshaper,
     double tolerance,
@@ -3572,8 +4963,8 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
         errorMessage = "face to rebuild is null";
         return false;
     }
-    if (edgeTasks.empty()) {
-        errorMessage = "face has no midline edge replacement tasks";
+    if (edgeTasks.empty() && edgesToRemove.empty()) {
+        errorMessage = "face has no midline replacement or endpoint removal tasks";
         return false;
     }
     if (midlineChain.edges.empty()) {
@@ -3605,6 +4996,7 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
         rebuilt.Orientation(TopAbs_FORWARD);
 
         std::vector<bool> replacedTasks(edgeTasks.size(), false);
+        std::vector<bool> removedTasks(edgesToRemove.size(), false);
         auto findTaskIndex = [&](const TopoDS_Edge& edge) {
             for (std::size_t taskIndex = 0; taskIndex < edgeTasks.size(); ++taskIndex) {
                 if (edgeTasks[taskIndex].sourceEdge.IsSame(edge)) {
@@ -3613,7 +5005,16 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
             }
             return -1;
         };
-
+        auto findRemovalIndex = [&](const TopoDS_Edge& edge) {
+            for (std::size_t removalIndex = 0;
+                 removalIndex < edgesToRemove.size();
+                 ++removalIndex) {
+                if (edgesToRemove[removalIndex].IsSame(edge)) {
+                    return static_cast<int>(removalIndex);
+                }
+            }
+            return -1;
+        };
         for (TopExp_Explorer wireExplorer(forwardFace, TopAbs_WIRE);
              wireExplorer.More();
              wireExplorer.Next()) {
@@ -3624,7 +5025,7 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
 
             // 直接子 edge use 是旧 wire 的完整基准，不能只依赖 WireExplorer 的返回结果。
             std::vector<TopoDS_Edge> directEdgeUses;
-            bool directWireHasReplacement = false;
+            bool directWireHasModification = false;
             for (TopoDS_Iterator directIterator(oldWire, Standard_False, Standard_False);
                  directIterator.More();
                  directIterator.Next()) {
@@ -3634,21 +5035,26 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
 
                 const TopoDS_Edge directEdge = TopoDS::Edge(directIterator.Value());
                 directEdgeUses.push_back(directEdge);
-                directWireHasReplacement =
-                    directWireHasReplacement || findTaskIndex(directEdge) >= 0;
+                directWireHasModification =
+                    directWireHasModification ||
+                    findTaskIndex(directEdge) >= 0 ||
+                    findRemovalIndex(directEdge) >= 0;
             }
 
             std::vector<TopoDS_Edge> wireEdges;
-            bool wireHasReplacement = false;
+            bool wireHasModification = false;
             for (BRepTools_WireExplorer edgeExplorer(oldWire, forwardFace);
                  edgeExplorer.More();
                  edgeExplorer.Next()) {
                 const TopoDS_Edge edgeInWire = edgeExplorer.Current();
                 wireEdges.push_back(edgeInWire);
-                wireHasReplacement = wireHasReplacement || findTaskIndex(edgeInWire) >= 0;
+                wireHasModification =
+                    wireHasModification ||
+                    findTaskIndex(edgeInWire) >= 0 ||
+                    findRemovalIndex(edgeInWire) >= 0;
             }
 
-            if (directWireHasReplacement) {
+            if (directWireHasModification) {
                 // 按 IsSame 做多重集匹配，既检查数量，也检查 WireExplorer 是否遗漏具体 edge use。
                 std::vector<bool> matchedDirectUses(directEdgeUses.size(), false);
                 int unexpectedExploredUses = 0;
@@ -3682,7 +5088,7 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
                 }
 
                 if (missingDirectUses > 0 || unexpectedExploredUses > 0 ||
-                    !wireHasReplacement) {
+                    !wireHasModification) {
                     std::ostringstream os;
                     os << "BRepTools_WireExplorer did not cover every direct edge use of the affected wire: "
                        << "direct=" << directEdgeUses.size()
@@ -3695,9 +5101,24 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
             }
 
             TopoDS_Wire wireToAdd = oldWire;
-            if (wireHasReplacement) {
-                BRepBuilderAPI_MakeWire wireMaker;
+            if (wireHasModification) {
+                std::vector<TopoDS_Edge> rebuiltEdgeUses;
+                std::vector<TopoDS_Edge> expectedReplacementUses;
                 for (const TopoDS_Edge& edgeInWire : wireEdges) {
+                    const int removalIndex = findRemovalIndex(edgeInWire);
+                    if (removalIndex >= 0) {
+                        const std::size_t mappedRemovalIndex =
+                            static_cast<std::size_t>(removalIndex);
+                        if (removedTasks[mappedRemovalIndex]) {
+                            errorMessage = "a short endpoint edge appears more than once in face wires";
+                            return false;
+                        }
+
+                        // 两端点已经映射到同一个中点；短连接 edge 在新 wire 中直接省略。
+                        removedTasks[mappedRemovalIndex] = true;
+                        continue;
+                    }
+
                     const int taskIndex = findTaskIndex(edgeInWire);
                     if (taskIndex < 0) {
                         const TopoDS_Shape adjustedShape = topologyReshaper.Apply(edgeInWire);
@@ -3707,7 +5128,7 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
                         }
                         TopoDS_Edge adjustedEdge = TopoDS::Edge(adjustedShape);
                         adjustedEdge.Orientation(edgeInWire.Orientation());
-                        wireMaker.Add(adjustedEdge);
+                        rebuiltEdgeUses.push_back(adjustedEdge);
                         continue;
                     }
 
@@ -3760,7 +5181,15 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
                             errorMessage = "failed to repair mapped midline pcurve: " + errorMessage;
                             return false;
                         }
-                        wireMaker.Add(replacementUse);
+                        if (!replacementUse.IsSame(
+                                midlineChain.edges[replacementEdgeIndex])) {
+                            errorMessage =
+                                "pcurve repair changed the canonical midline edge identity";
+                            return false;
+                        }
+
+                        rebuiltEdgeUses.push_back(replacementUse);
+                        expectedReplacementUses.push_back(replacementUse);
                         return true;
                     };
 
@@ -3791,13 +5220,108 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
                     replacedTasks[mappedIndex] = true;
                 }
 
-                if (!wireMaker.IsDone()) {
-                    errorMessage = "failed to rebuild wire while replacing mapped midline edges";
+                if (rebuiltEdgeUses.empty()) {
+                    errorMessage =
+                        "affected wire is empty after mapped midline replacement";
                     return false;
                 }
 
-                wireToAdd = wireMaker.Wire();
+                // MakeWire 会在顶点仅几何接近时复制 edge 并替换端点，这会破坏两侧 face
+                // 对 canonical midline edge TShape 的共享。这里先要求真实拓扑连接，再直接组装 wire。
+                auto describeVertexConnection = [](const TopoDS_Vertex& lhs,
+                                                   const TopoDS_Vertex& rhs) {
+                    std::ostringstream os;
+                    try {
+                        os << "distance=" << BRep_Tool::Pnt(lhs).Distance(BRep_Tool::Pnt(rhs))
+                           << ", lhsTolerance=" << BRep_Tool::Tolerance(lhs)
+                           << ", rhsTolerance=" << BRep_Tool::Tolerance(rhs);
+                    }
+                    catch (const Standard_Failure&) {
+                        os << "distance unavailable";
+                    }
+                    return os.str();
+                };
+
+                TopoDS_Vertex firstWireVertex;
+                TopoDS_Vertex previousEndVertex;
+                for (std::size_t edgeUseIndex = 0;
+                     edgeUseIndex < rebuiltEdgeUses.size();
+                     ++edgeUseIndex) {
+                    TopoDS_Vertex edgeStart;
+                    TopoDS_Vertex edgeEnd;
+                    if (!getEdgeVertices(
+                            rebuiltEdgeUses[edgeUseIndex],
+                            edgeStart,
+                            edgeEnd)) {
+                        errorMessage =
+                            "failed to obtain rebuilt wire edge vertices";
+                        return false;
+                    }
+
+                    if (edgeUseIndex == 0) {
+                        firstWireVertex = edgeStart;
+                    }
+                    else if (!previousEndVertex.IsSame(edgeStart)) {
+                        errorMessage =
+                            "rebuilt wire edges are only geometrically connected, not topologically shared: "
+                            + describeVertexConnection(previousEndVertex, edgeStart);
+                        return false;
+                    }
+                    previousEndVertex = edgeEnd;
+                }
+
+                if (firstWireVertex.IsNull() || previousEndVertex.IsNull() ||
+                    !previousEndVertex.IsSame(firstWireVertex)) {
+                    errorMessage =
+                        "rebuilt wire is not topologically closed after short endpoint collapse";
+                    if (!firstWireVertex.IsNull() && !previousEndVertex.IsNull()) {
+                        errorMessage += ": "
+                            + describeVertexConnection(
+                                previousEndVertex,
+                                firstWireVertex);
+                    }
+                    return false;
+                }
+
+                BRep_Builder strictWireBuilder;
+                TopoDS_Wire strictWire;
+                strictWireBuilder.MakeWire(strictWire);
+                for (const TopoDS_Edge& rebuiltEdgeUse : rebuiltEdgeUses) {
+                    strictWireBuilder.Add(strictWire, rebuiltEdgeUse);
+                }
+                wireToAdd = strictWire;
                 wireToAdd.Orientation(oldWire.Orientation());
+
+                auto validateCanonicalReplacementUses =
+                    [&](const TopoDS_Wire& wire, const char* stage) {
+                        for (const TopoDS_Edge& expectedUse :
+                             expectedReplacementUses) {
+                            int sameUseCount = 0;
+                            for (TopoDS_Iterator edgeIterator(
+                                     wire,
+                                     Standard_False,
+                                     Standard_False);
+                                 edgeIterator.More();
+                                 edgeIterator.Next()) {
+                                if (edgeIterator.Value().ShapeType() ==
+                                        TopAbs_EDGE &&
+                                    edgeIterator.Value().IsSame(expectedUse)) {
+                                    ++sameUseCount;
+                                }
+                            }
+                            if (sameUseCount != 1) {
+                                errorMessage = std::string(stage)
+                                    + " does not contain exactly one canonical midline edge use";
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+                if (!validateCanonicalReplacementUses(
+                        wireToAdd,
+                        "strict rebuilt wire")) {
+                    return false;
+                }
 
                 // 局部修复仅处理受影响 wire，最终仍由 ShapeFix_Shape 统一检查和修复整体 shape。
                 ShapeFix_Wire wireFix(wireToAdd, forwardFace, faceTolerance);
@@ -3822,6 +5346,11 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
 
                 fixedWire.Orientation(oldWire.Orientation());
                 wireToAdd = fixedWire;
+                if (!validateCanonicalReplacementUses(
+                        wireToAdd,
+                        "ShapeFix_Wire result")) {
+                    return false;
+                }
             }
             else {
                 const TopoDS_Shape adjustedWireShape = topologyReshaper.Apply(oldWire);
@@ -3839,6 +5368,14 @@ bool HealClosedNarrowGap::rebuildFaceByReplacingMappedEdges(
         for (std::size_t taskIndex = 0; taskIndex < replacedTasks.size(); ++taskIndex) {
             if (!replacedTasks[taskIndex]) {
                 errorMessage = "face does not contain one of its mapped source edges";
+                return false;
+            }
+        }
+        for (std::size_t removalIndex = 0;
+             removalIndex < removedTasks.size();
+             ++removalIndex) {
+            if (!removedTasks[removalIndex]) {
+                errorMessage = "face does not contain one of its short endpoint edges";
                 return false;
             }
         }
@@ -4088,6 +5625,7 @@ bool HealClosedNarrowGap::validateRepairResult(
     const TopoDS_Shape& beforeShape,
     const TopoDS_Shape& afterShape,
     const EdgeChain& keptChain,
+    const std::vector<TopoDS_Edge>& removedEdges,
     int freeEdgesBefore,
     std::string& errorMessage) const
 {
@@ -4131,6 +5669,21 @@ bool HealClosedNarrowGap::validateRepairResult(
            << freeEdgesBefore << ", after=" << freeEdgesAfter;
         errorMessage = os.str();
         return false;
+    }
+
+    if (!removedEdges.empty()) {
+        TopTools_IndexedMapOfShape resultEdges;
+        TopExp::MapShapes(afterShape, TopAbs_EDGE, resultEdges);
+        for (const TopoDS_Edge& removedEdge : removedEdges) {
+            for (int edgeIndex = 1;
+                edgeIndex <= resultEdges.Extent();
+                 ++edgeIndex) {
+                if (resultEdges.FindKey(edgeIndex).IsSame(removedEdge)) {
+                    errorMessage = "an edge scheduled for removal is still present after repair";
+                    return false;
+                }
+            }
+        }
     }
 
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
