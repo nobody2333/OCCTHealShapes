@@ -246,19 +246,8 @@ int healSimpleHole(const std::string& fileName) {
     }
 
     HealSimpleHole::Params holeParams;
-    // 自动补孔无法仅凭拓扑区分设计开口，使用前应按模型单位调整这些范围。
-    holeParams.minBoundaryDiameter = 1.0e-1;
-    holeParams.maxBoundaryDiameter = 1.0e1;
-    holeParams.fillingPointsOnCurve = 15;
-    holeParams.fillingIterations = 2;
-    holeParams.fillingMaxDegree = 6;
-    holeParams.fillingMaxSegments = 16;
-    holeParams.tryHighComplexityC0Fallback = true;
-    holeParams.fallbackFillingMaxDegree = 7;
-    holeParams.fallbackFillingMaxSegments = 100;
-    // 当前模型其余同类孔洞的 C0 filling G0Error 约为 0.014~0.016。
-    holeParams.maxFillingG0Error = 2.0e-2;
-    holeParams.maxRebuiltBoundaryDeviation = 4.0e-2;
+    // 使用 HealSimpleHole::Params 中统一的已验证默认值。自动补孔无法仅凭拓扑
+    // 区分设计开口；处理其他模型尺度时仍应按模型单位覆盖尺寸与误差参数。
 
     ShapeRepairPipeline pipeline;
     pipeline.addStage(
@@ -479,8 +468,8 @@ int runShapeRepairPipeline(const std::string& fileName) {
     // 调整这些开关即可指定参与本次修复的模块。
     const bool enableHealNarrowGap = true;
     const bool enableHealClosedNarrowGap = true;
-    // 自动补孔需要结合模型单位设置尺寸范围，默认不启用。
-    const bool enableHealSimpleHole = false;
+    // 自动补孔需要结合模型单位设置尺寸范围；当前已启用。
+    const bool enableHealSimpleHole = true;
 
     ShapeRepairPipeline::Params pipelineParams;
     pipelineParams.rejectShapeTypeChange = true;
@@ -492,18 +481,7 @@ int runShapeRepairPipeline(const std::string& fileName) {
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
 
-    // 与单独运行 HealSimpleHole 时使用相同的已验证参数。
-    simpleHoleParams.minBoundaryDiameter = 1.0e-1;
-    simpleHoleParams.maxBoundaryDiameter = 1.0e1;
-    simpleHoleParams.fillingPointsOnCurve = 15;
-    simpleHoleParams.fillingIterations = 2;
-    simpleHoleParams.fillingMaxDegree = 6;
-    simpleHoleParams.fillingMaxSegments = 16;
-    simpleHoleParams.tryHighComplexityC0Fallback = true;
-    simpleHoleParams.fallbackFillingMaxDegree = 7;
-    simpleHoleParams.fallbackFillingMaxSegments = 100;
-    simpleHoleParams.maxFillingG0Error = 2.0e-2;
-    simpleHoleParams.maxRebuiltBoundaryDeviation = 4.0e-2;
+    // 与独立入口共用 HealSimpleHole::Params 中的默认配置。
 
 	closedNarrowGapParams.midlineConstructionMode = HealClosedNarrowGap::MidlineConstructionMode::ProjectionCorrespondence;
 
@@ -545,7 +523,7 @@ int main()
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);
     //healClosedGap(fileName);
-    //healSimpleHole(fileName);
+	//healSimpleHole(fileName);
 	//sewShellsOnStepShape(filename);
 	runShapeRepairPipeline(fileName);
     return 0;

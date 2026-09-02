@@ -70,22 +70,40 @@ public:
 
         // BRepFill_Filling 的边界逼近参数。
         double fillingTolerance = 1.0e-3;
-        double maxFillingG0Error = 1.0e-2;
+        // Plate 转换为最终 B-spline surface 时的内部近似容差。
+        // 它与 Plate 构造容差分开，最终孔边仍由实测偏差上限独立约束。
+        double surfaceApproximationTolerance = 5.0e-3;
+        // 最终 B-spline 与整个 Plate 曲面的最大允许偏差；近似器即使未达到
+        // 目标容差也可能返回 surface，因此必须单独检查实际 ApproxError。
+        double maxSurfaceApproximationDeviation = 4.0e-2;
+        double maxFillingG0Error = 2.0e-2;
         // 原 boundary edge 到最终重建补面的最大实测距离，与 Plate G0 上限分开控制。
-        double maxRebuiltBoundaryDeviation = 2.0e-2;
+        double maxRebuiltBoundaryDeviation = 4.0e-2;
         double maxFillingG1Error = 15.0 * 3.14159265358979323846 / 180.0;
         double fillingAngularTolerance = 5.0 * 3.14159265358979323846 / 180.0;
         double fillingCurvatureTolerance = 1.0e-1;
         int fillingDegree = 3;
         int fillingPointsOnCurve = 15;
         int fillingIterations = 2;
-        int fillingMaxDegree = 8;
-        int fillingMaxSegments = 9;
+        // B-spline 近似从最低复杂度开始逐级尝试；优先保持低 degree，
+        // 同一 degree 下按固定步长增加 segments。
+        int approximationMinDegree = 3;
+        int approximationMinSegments = 8;
+        int approximationDegreeStep = 1;
+        int approximationSegmentStep = 8;
+        int fillingMaxDegree = 3;
+        int fillingMaxSegments = 32;
 
-        // 主 C0 低复杂度近似失败后，是否尝试更高复杂度的严格 Plate 近似。
+        // 普通复杂度范围失败后，是否继续按相同步长扩展 C0 搜索范围。
         bool tryHighComplexityC0Fallback = true;
-        int fallbackFillingMaxDegree = 8;
+        int fallbackFillingMaxDegree = 7;
         int fallbackFillingMaxSegments = 100;
+        // 只给最低 degree 额外的渐进分段预算；仍受控制点硬上限约束。
+        int lowestDegreeMaxSegments = 160;
+
+        // 最终 B-spline surface 的复杂度硬上限，防止分段预算未用满时仍产生异常大曲面。
+        int maxFillingPolesPerDirection = 70;
+        int maxFillingControlPoints = 4900;
 
         // 仅用于最终兜底的 owner shell 局部 sewing，不参与 filling 曲面拟合。
         double localSewingTolerance = 1.0e-3;
@@ -95,6 +113,10 @@ public:
         // 新 face 上 pcurve 投影精度和算法新增容差上限；已有边容差不会被该上限反向拒绝。
         double pcurveTolerance = 1.0e-5;
         double maxPCurveTolerance = 1.0e-3;
+        // 优先把原始 3D 孔边重新投影到最终 B-spline surface；同时测量
+        // Plate pcurve，逐边选择实际偏差较小者，避免低 degree 被旧参数化误判。
+        bool reprojectBoundaryOnFinalSurface = true;
+        int finalBoundaryProjectionSamples = 41;
 
         // 新 face 加入 shell 后是否用 ShapeFix_Shell 统一 face orientation。
         bool fixShellOrientation = true;
@@ -178,7 +200,9 @@ private:
         std::vector<Handle(Geom2d_Curve)>& boundaryPCurves,
         double& g0Error,
         double& g1Error,
-        std::string& errorMessage) const;
+        std::string& errorMessage,
+        int maxDegree,
+        int maxSegments) const;
 
     // 使用严格轮廓准则近似 C0 Plate，避免 BRepFill_Filling 的 10 倍 G0 放大。
     bool buildStrictC0BSplinePatchFace(
@@ -199,6 +223,9 @@ private:
         double g0Error,
         TopoDS_Face& patchFace,
         double& patchArea,
+        int& reprojectedEdgeCount,
+        int& reusedPlatePCurveCount,
+        double& maxSelectedPCurveDeviation,
         std::string& errorMessage) const;
 
     // 修复、校验 patch face 的 pcurve、edge 复用关系和面积。
@@ -239,6 +266,15 @@ private:
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
+
+    // 为单次策略复制 candidate 所属 shell，并把候选映射到复制后的独立拓扑。
+    // 策略失败时直接丢弃 trial，避免修改 currentShape 的共享 TShape。
+    bool createTrialCandidate(
+        const TopoDS_Shape& currentShape,
+        const Candidate& candidate,
+        TopoDS_Shape& trialShape,
+        Candidate& trialCandidate,
+        std::string& errorMessage) const;
 
     bool validateRepairResult(
         const TopoDS_Shape& beforeShape,

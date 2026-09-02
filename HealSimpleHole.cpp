@@ -14,6 +14,7 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_FindPlane.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -63,6 +64,20 @@
 
 namespace
 {
+    struct FillingComplexityLevel
+    {
+        int maxDegree = 3;
+        int maxSegments = 1;
+        bool extendedFallback = false;
+    };
+
+    struct SurfaceApproximationMetrics
+    {
+        double approximationError = 0.0;
+        double criterionError = 0.0;
+        std::string method;
+    };
+
     struct BoundaryEdgeUse
     {
         TopoDS_Edge edge;
@@ -79,10 +94,304 @@ namespace
         std::vector<TopoDS_Vertex> vertices;
     };
 
+    std::vector<int> steppedValues(int minimum, int maximum, int step)
+    {
+        std::vector<int> values;
+        for (int value = minimum; value < maximum;) {
+            values.push_back(value);
+            if (value > maximum - step) {
+                break;
+            }
+            value += step;
+        }
+        if (values.empty() || values.back() != maximum) {
+            values.push_back(maximum);
+        }
+        return values;
+    }
+
+    std::vector<FillingComplexityLevel> buildComplexityLevels(
+        int minDegree,
+        int minSegments,
+        int degreeStep,
+        int segmentStep,
+        int normalMaxDegree,
+        int normalMaxSegments,
+        bool includeExtendedFallback,
+        int fallbackMaxDegree,
+        int fallbackMaxSegments,
+        int lowestDegreeMaxSegments)
+    {
+        const int finalMaxDegree = includeExtendedFallback
+            ? fallbackMaxDegree
+            : normalMaxDegree;
+        const int finalMaxSegments = includeExtendedFallback
+            ? fallbackMaxSegments
+            : normalMaxSegments;
+        const std::vector<int> degrees = steppedValues(
+            minDegree,
+            finalMaxDegree,
+            degreeStep);
+
+        std::vector<FillingComplexityLevel> levels;
+        for (const int degree : degrees) {
+            const int degreeMaxSegments = degree == minDegree
+                ? std::max(finalMaxSegments, lowestDegreeMaxSegments)
+                : finalMaxSegments;
+            const std::vector<int> segments = steppedValues(
+                minSegments,
+                degreeMaxSegments,
+                segmentStep);
+            for (const int segmentCount : segments) {
+                FillingComplexityLevel level;
+                level.maxDegree = degree;
+                level.maxSegments = segmentCount;
+                level.extendedFallback = degree > normalMaxDegree
+                    || segmentCount > normalMaxSegments;
+                levels.push_back(level);
+            }
+        }
+        return levels;
+    }
+
     std::string failureText(const Standard_Failure& failure)
     {
         const char* message = failure.GetMessageString();
         return message != nullptr ? message : "OCCT failure";
+    }
+
+    bool checkSurfaceComplexity(
+        const Handle(Geom_BSplineSurface)& surface,
+        int requestedMaxDegree,
+        int maxPolesPerDirection,
+        int maxControlPoints,
+        std::string& errorMessage)
+    {
+        if (surface.IsNull()) {
+            errorMessage = "B-spline approximation returned a null surface";
+            return false;
+        }
+
+        const int uDegree = surface->UDegree();
+        const int vDegree = surface->VDegree();
+        const int uPoles = surface->NbUPoles();
+        const int vPoles = surface->NbVPoles();
+        const long long controlPointCount = static_cast<long long>(uPoles)
+            * static_cast<long long>(vPoles);
+        if (uDegree > requestedMaxDegree || vDegree > requestedMaxDegree) {
+            std::ostringstream message;
+            message << "B-spline degree exceeds the requested level: uDegree="
+                    << uDegree
+                    << ", vDegree=" << vDegree
+                    << ", requestedMaximum=" << requestedMaxDegree;
+            errorMessage = message.str();
+            return false;
+        }
+        if (uPoles > maxPolesPerDirection || vPoles > maxPolesPerDirection) {
+            std::ostringstream message;
+            message << "B-spline pole count exceeds the per-direction limit: uPoles="
+                    << uPoles
+                    << ", vPoles=" << vPoles
+                    << ", maximum=" << maxPolesPerDirection;
+            errorMessage = message.str();
+            return false;
+        }
+        if (controlPointCount > maxControlPoints) {
+            std::ostringstream message;
+            message << "B-spline control-point count exceeds the limit: actual="
+                    << controlPointCount
+                    << ", maximum=" << maxControlPoints;
+            errorMessage = message.str();
+            return false;
+        }
+        return true;
+    }
+
+    struct StrictC0PlateData
+    {
+        Handle(GeomPlate_Surface) plateSurface;
+        std::vector<Handle(Geom2d_Curve)> boundaryPCurves;
+        TColgp_SequenceOfXY contour2d;
+        TColgp_SequenceOfXYZ contour3d;
+        double g0Error = 0.0;
+        double boundaryTolerance = 0.0;
+    };
+
+    bool prepareStrictC0Plate(
+        const std::vector<TopoDS_Edge>& boundaryEdges,
+        int fillingDegree,
+        int fillingPointsOnCurve,
+        int fillingIterations,
+        double fillingTolerance,
+        double fillingAngularTolerance,
+        double fillingCurvatureTolerance,
+        double maxFillingG0Error,
+        StrictC0PlateData& plateData,
+        std::string& errorMessage)
+    {
+        plateData = StrictC0PlateData();
+        if (boundaryEdges.empty()) {
+            errorMessage = "C0 Plate boundary is empty";
+            return false;
+        }
+
+        try {
+            GeomPlate_BuildPlateSurface plateBuilder(
+                std::max(3, fillingDegree),
+                fillingPointsOnCurve,
+                fillingIterations,
+                fillingTolerance,
+                fillingTolerance,
+                fillingAngularTolerance,
+                fillingCurvatureTolerance,
+                Standard_False);
+
+            for (const TopoDS_Edge& boundaryEdge : boundaryEdges) {
+                Handle(BRepAdaptor_Curve) curveAdaptor = new BRepAdaptor_Curve();
+                curveAdaptor->Initialize(boundaryEdge);
+                const Handle(Adaptor3d_Curve)& curve3d = curveAdaptor;
+                Handle(BRepFill_CurveConstraint) constraint =
+                    new BRepFill_CurveConstraint(
+                        curve3d,
+                        0,
+                        fillingPointsOnCurve,
+                        fillingTolerance);
+                plateBuilder.Add(constraint);
+            }
+            plateBuilder.SetNbBounds(
+                static_cast<Standard_Integer>(boundaryEdges.size()));
+            plateBuilder.Perform();
+            if (!plateBuilder.IsDone() || plateBuilder.Surface().IsNull()) {
+                errorMessage = "strict C0 Plate construction was not done";
+                return false;
+            }
+
+            plateData.g0Error = plateBuilder.G0Error();
+            if (!std::isfinite(plateData.g0Error)
+                || plateData.g0Error > maxFillingG0Error) {
+                std::ostringstream message;
+                message << "strict C0 Plate G0 error is too large: error="
+                        << plateData.g0Error
+                        << ", maximum=" << maxFillingG0Error;
+                errorMessage = message.str();
+                return false;
+            }
+
+            plateBuilder.Disc2dContour(8, plateData.contour2d);
+            plateBuilder.Disc3dContour(8, 0, plateData.contour3d);
+            plateData.boundaryTolerance = std::max({
+                fillingTolerance,
+                maxFillingG0Error,
+                plateData.g0Error + fillingTolerance });
+            plateData.plateSurface = plateBuilder.Surface();
+
+            const Handle(TColGeom2d_HArray1OfCurve) platePCurves =
+                plateBuilder.Curves2d();
+            if (platePCurves.IsNull()
+                || platePCurves->Length()
+                    != static_cast<Standard_Integer>(boundaryEdges.size())) {
+                errorMessage = "strict C0 Plate returned an unexpected pcurve count";
+                return false;
+            }
+            for (Standard_Integer index = platePCurves->Lower();
+                 index <= platePCurves->Upper();
+                 ++index) {
+                const Handle(Geom2d_Curve) platePCurve =
+                    platePCurves->Value(index);
+                if (platePCurve.IsNull()) {
+                    errorMessage = "strict C0 Plate returned a null boundary pcurve";
+                    return false;
+                }
+                plateData.boundaryPCurves.push_back(platePCurve);
+            }
+        }
+        catch (const Standard_Failure& failure) {
+            errorMessage = "OCCT failure while preparing strict C0 Plate: "
+                + failureText(failure);
+            return false;
+        }
+        return true;
+    }
+
+    bool approximateStrictC0Plate(
+        const StrictC0PlateData& plateData,
+        double approximationTolerance,
+        double maxApproximationDeviation,
+        int maxDegree,
+        int maxSegments,
+        int maxPolesPerDirection,
+        int maxControlPoints,
+        TopoDS_Face& temporaryPatchFace,
+        std::vector<Handle(Geom2d_Curve)>& boundaryPCurves,
+        double& g0Error,
+        double& g1Error,
+        SurfaceApproximationMetrics& metrics,
+        std::string& errorMessage)
+    {
+        temporaryPatchFace.Nullify();
+        boundaryPCurves.clear();
+        g0Error = plateData.g0Error;
+        g1Error = 0.0;
+        metrics = SurfaceApproximationMetrics();
+        if (plateData.plateSurface.IsNull()) {
+            errorMessage = "prepared strict C0 Plate surface is null";
+            return false;
+        }
+
+        try {
+            GeomPlate_PlateG0Criterion boundaryCriterion(
+                plateData.contour2d,
+                plateData.contour3d,
+                plateData.boundaryTolerance);
+            GeomPlate_MakeApprox approximation(
+                plateData.plateSurface,
+                boundaryCriterion,
+                approximationTolerance,
+                maxSegments,
+                maxDegree,
+                GeomAbs_C0,
+                1.0);
+            metrics.approximationError = approximation.ApproxError();
+            metrics.criterionError = approximation.CriterionError();
+            metrics.method = "GeomPlate_MakeApprox";
+            if (!std::isfinite(metrics.approximationError)
+                || metrics.approximationError > maxApproximationDeviation) {
+                std::ostringstream message;
+                message << "B-spline to Plate approximation deviation is too large: actual="
+                        << metrics.approximationError
+                        << ", maximum=" << maxApproximationDeviation
+                        << ", target=" << approximationTolerance;
+                errorMessage = message.str();
+                return false;
+            }
+            const Handle(Geom_BSplineSurface) surface = approximation.Surface();
+            if (!checkSurfaceComplexity(
+                    surface,
+                    maxDegree,
+                    maxPolesPerDirection,
+                    maxControlPoints,
+                    errorMessage)) {
+                return false;
+            }
+
+            boundaryPCurves = plateData.boundaryPCurves;
+            BRep_Builder builder;
+            builder.MakeFace(
+                temporaryPatchFace,
+                surface,
+                TopLoc_Location(),
+                approximationTolerance);
+            if (temporaryPatchFace.IsNull()) {
+                errorMessage = "strict C0 Plate returned a null temporary face";
+                return false;
+            }
+        }
+        catch (const Standard_Failure& failure) {
+            errorMessage = "OCCT failure while approximating strict C0 Plate: "
+                + failureText(failure);
+            return false;
+        }
+        return true;
     }
 
     int listExtent(const TopTools_ListOfShape& shapes)
@@ -521,6 +830,54 @@ namespace
         return true;
     }
 
+    bool measurePCurveDeviation(
+        const TopoDS_Edge& edge,
+        const Handle(Geom_Surface)& surface,
+        const Handle(Geom2d_Curve)& pcurve,
+        int sampleCount,
+        double& maxDeviation)
+    {
+        maxDeviation = std::numeric_limits<double>::infinity();
+        if (edge.IsNull() || surface.IsNull() || pcurve.IsNull()) {
+            return false;
+        }
+
+        try {
+            sampleCount = std::max(5, sampleCount);
+            const BRepAdaptor_Curve edgeCurve(edge);
+            const double first = edgeCurve.FirstParameter();
+            const double last = edgeCurve.LastParameter();
+            if (!std::isfinite(first)
+                || !std::isfinite(last)
+                || last - first <= Precision::PConfusion()) {
+                return false;
+            }
+
+            double measuredMaximum = 0.0;
+            for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+                const double ratio = static_cast<double>(sampleIndex)
+                    / static_cast<double>(sampleCount - 1);
+                const double parameter = first + (last - first) * ratio;
+                const gp_Pnt point3d = edgeCurve.Value(parameter);
+                const gp_Pnt2d uv = pcurve->Value(parameter);
+                if (!std::isfinite(uv.X()) || !std::isfinite(uv.Y())) {
+                    return false;
+                }
+                const gp_Pnt surfacePoint = surface->Value(uv.X(), uv.Y());
+                const double deviation = point3d.Distance(surfacePoint);
+                if (!std::isfinite(deviation)) {
+                    return false;
+                }
+                measuredMaximum = std::max(measuredMaximum, deviation);
+            }
+            maxDeviation = measuredMaximum;
+            return true;
+        }
+        catch (const Standard_Failure&) {
+            return false;
+        }
+    }
+
     bool findSingleOwnerShell(
         const std::vector<TopoDS_Face>& ownerFaces,
         const TopTools_IndexedDataMapOfShapeListOfShape& faceShellMap,
@@ -721,6 +1078,13 @@ HealSimpleHole::HealSimpleHole(const Params& params)
     params_.maxRebuiltBoundaryDeviation = std::max(
         params_.fillingTolerance,
         params_.maxRebuiltBoundaryDeviation);
+    params_.surfaceApproximationTolerance = std::min(
+        params_.maxRebuiltBoundaryDeviation,
+        std::max(params_.fillingTolerance,
+                 params_.surfaceApproximationTolerance));
+    params_.maxSurfaceApproximationDeviation = std::max(
+        params_.surfaceApproximationTolerance,
+        params_.maxSurfaceApproximationDeviation);
     params_.maxFillingG1Error = std::max(0.0, params_.maxFillingG1Error);
     params_.fillingAngularTolerance = std::max(
         Precision::Angular(),
@@ -731,16 +1095,42 @@ HealSimpleHole::HealSimpleHole(const Params& params)
     params_.fillingDegree = std::max(2, params_.fillingDegree);
     params_.fillingPointsOnCurve = std::max(3, params_.fillingPointsOnCurve);
     params_.fillingIterations = std::max(1, params_.fillingIterations);
+    params_.approximationMinDegree = std::max(
+        2,
+        params_.approximationMinDegree);
+    params_.approximationMinSegments = std::max(
+        1,
+        params_.approximationMinSegments);
+    params_.approximationDegreeStep = std::max(
+        1,
+        params_.approximationDegreeStep);
+    params_.approximationSegmentStep = std::max(
+        1,
+        params_.approximationSegmentStep);
     params_.fillingMaxDegree = std::max(
-        params_.fillingDegree,
+        std::max(params_.fillingDegree, params_.approximationMinDegree),
         params_.fillingMaxDegree);
-    params_.fillingMaxSegments = std::max(1, params_.fillingMaxSegments);
+    params_.fillingMaxSegments = std::max(
+        params_.approximationMinSegments,
+        params_.fillingMaxSegments);
     params_.fallbackFillingMaxDegree = std::max(
         params_.fillingMaxDegree,
         params_.fallbackFillingMaxDegree);
     params_.fallbackFillingMaxSegments = std::max(
         params_.fillingMaxSegments,
         params_.fallbackFillingMaxSegments);
+    params_.lowestDegreeMaxSegments = std::max(
+        params_.fallbackFillingMaxSegments,
+        params_.lowestDegreeMaxSegments);
+    params_.maxFillingPolesPerDirection = std::max(
+        1,
+        params_.maxFillingPolesPerDirection);
+    params_.maxFillingControlPoints = std::max(
+        1,
+        params_.maxFillingControlPoints);
+    params_.finalBoundaryProjectionSamples = std::max(
+        5,
+        params_.finalBoundaryProjectionSamples);
     params_.localSewingMinTolerance = std::max(
         Precision::Confusion(),
         params_.localSewingMinTolerance);
@@ -809,12 +1199,30 @@ int HealSimpleHole::perform()
                    << ", useLocalSewingFallback="
                    << (params_.useLocalSewingFallback ? "true" : "false")
                    << ", fillingTolerance=" << params_.fillingTolerance
+                   << ", surfaceApproximationTolerance="
+                   << params_.surfaceApproximationTolerance
+                   << ", maxSurfaceApproximationDeviation="
+                   << params_.maxSurfaceApproximationDeviation
                    << ", maxFillingG0Error=" << params_.maxFillingG0Error
                    << ", maxRebuiltBoundaryDeviation="
                    << params_.maxRebuiltBoundaryDeviation
                    << ", maxFillingG1Error=" << params_.maxFillingG1Error
                    << ", fillingPointsOnCurve=" << params_.fillingPointsOnCurve
                    << ", fillingIterations=" << params_.fillingIterations
+                   << ", reprojectBoundaryOnFinalSurface="
+                   << (params_.reprojectBoundaryOnFinalSurface
+                           ? "true"
+                           : "false")
+                   << ", finalBoundaryProjectionSamples="
+                   << params_.finalBoundaryProjectionSamples
+                   << ", approximationMinDegree="
+                   << params_.approximationMinDegree
+                   << ", approximationMinSegments="
+                   << params_.approximationMinSegments
+                   << ", approximationDegreeStep="
+                   << params_.approximationDegreeStep
+                   << ", approximationSegmentStep="
+                   << params_.approximationSegmentStep
                    << ", fillingMaxDegree=" << params_.fillingMaxDegree
                    << ", fillingMaxSegments=" << params_.fillingMaxSegments
                    << ", tryHighComplexityC0Fallback="
@@ -823,6 +1231,12 @@ int HealSimpleHole::perform()
                    << params_.fallbackFillingMaxDegree
                    << ", fallbackFillingMaxSegments="
                    << params_.fallbackFillingMaxSegments
+                   << ", lowestDegreeMaxSegments="
+                   << params_.lowestDegreeMaxSegments
+                   << ", maxFillingPolesPerDirection="
+                   << params_.maxFillingPolesPerDirection
+                   << ", maxFillingControlPoints="
+                   << params_.maxFillingControlPoints
                    << ", localSewingTolerance="
                    << params_.localSewingTolerance;
         appendMessage(parameters.str());
@@ -1255,7 +1669,9 @@ bool HealSimpleHole::buildTemporaryBSplinePatchFace(
     std::vector<Handle(Geom2d_Curve)>& boundaryPCurves,
     double& g0Error,
     double& g1Error,
-    std::string& errorMessage) const
+    std::string& errorMessage,
+    int maxDegree,
+    int maxSegments) const
 {
     temporaryPatchFace.Nullify();
     boundaryPCurves.clear();
@@ -1274,8 +1690,8 @@ bool HealSimpleHole::buildTemporaryBSplinePatchFace(
             g0Error,
             g1Error,
             errorMessage,
-            params_.fillingMaxDegree,
-            params_.fillingMaxSegments);
+            maxDegree,
+            maxSegments);
     }
 
     try {
@@ -1290,8 +1706,8 @@ bool HealSimpleHole::buildTemporaryBSplinePatchFace(
             params_.fillingAngularTolerance,
             params_.fillingCurvatureTolerance);
         filling.SetApproxParam(
-            params_.fillingMaxDegree,
-            params_.fillingMaxSegments);
+            maxDegree,
+            maxSegments);
 
         for (std::size_t edgeIndex = 0;
              edgeIndex < candidate.boundaryEdges.size();
@@ -1345,8 +1761,18 @@ bool HealSimpleHole::buildTemporaryBSplinePatchFace(
             errorMessage = "B-spline filling face has no support surface";
             return false;
         }
-        if (Handle(Geom_BSplineSurface)::DownCast(surface).IsNull()) {
+        const Handle(Geom_BSplineSurface) bsplineSurface =
+            Handle(Geom_BSplineSurface)::DownCast(surface);
+        if (bsplineSurface.IsNull()) {
             errorMessage = "BRepFill_Filling result surface is not a Geom_BSplineSurface";
+            return false;
+        }
+        if (!checkSurfaceComplexity(
+                bsplineSurface,
+                maxDegree,
+                params_.maxFillingPolesPerDirection,
+                params_.maxFillingControlPoints,
+                errorMessage)) {
             return false;
         }
     }
@@ -1369,120 +1795,35 @@ bool HealSimpleHole::buildStrictC0BSplinePatchFace(
     int maxDegree,
     int maxSegments) const
 {
-    temporaryPatchFace.Nullify();
-    boundaryPCurves.clear();
-    g0Error = 0.0;
-    g1Error = 0.0;
-    if (candidate.boundaryEdges.empty()) {
-        errorMessage = "C0 Plate boundary is empty";
-        return false;
-    }
-
-    try {
-        GeomPlate_BuildPlateSurface plateBuilder(
-            std::max(3, params_.fillingDegree),
+    StrictC0PlateData plateData;
+    SurfaceApproximationMetrics metrics;
+    if (!prepareStrictC0Plate(
+            candidate.boundaryEdges,
+            params_.fillingDegree,
             params_.fillingPointsOnCurve,
             params_.fillingIterations,
             params_.fillingTolerance,
-            params_.fillingTolerance,
             params_.fillingAngularTolerance,
             params_.fillingCurvatureTolerance,
-            Standard_False);
-
-        for (const TopoDS_Edge& boundaryEdge : candidate.boundaryEdges) {
-            Handle(BRepAdaptor_Curve) curveAdaptor = new BRepAdaptor_Curve();
-            curveAdaptor->Initialize(boundaryEdge);
-            const Handle(Adaptor3d_Curve)& curve3d = curveAdaptor;
-            Handle(BRepFill_CurveConstraint) constraint =
-                new BRepFill_CurveConstraint(
-                    curve3d,
-                    0,
-                    params_.fillingPointsOnCurve,
-                    params_.fillingTolerance);
-            plateBuilder.Add(constraint);
-        }
-        plateBuilder.SetNbBounds(
-            static_cast<Standard_Integer>(candidate.boundaryEdges.size()));
-        plateBuilder.Perform();
-        if (!plateBuilder.IsDone() || plateBuilder.Surface().IsNull()) {
-            errorMessage = "strict C0 Plate construction was not done";
-            return false;
-        }
-
-        g0Error = plateBuilder.G0Error();
-        if (!std::isfinite(g0Error) || g0Error > params_.maxFillingG0Error) {
-            std::ostringstream message;
-            message << "strict C0 Plate G0 error is too large: error="
-                    << g0Error
-                    << ", maximum=" << params_.maxFillingG0Error;
-            errorMessage = message.str();
-            return false;
-        }
-
-        TColgp_SequenceOfXY contour2d;
-        TColgp_SequenceOfXYZ contour3d;
-        plateBuilder.Disc2dContour(8, contour2d);
-        plateBuilder.Disc3dContour(8, 0, contour3d);
-        const double strictBoundaryTolerance = std::max({
-            params_.fillingTolerance,
             params_.maxFillingG0Error,
-            g0Error + params_.fillingTolerance });
-        GeomPlate_PlateG0Criterion boundaryCriterion(
-            contour2d,
-            contour3d,
-            strictBoundaryTolerance);
-        GeomPlate_MakeApprox approximation(
-            plateBuilder.Surface(),
-            boundaryCriterion,
-            params_.fillingTolerance,
-            maxSegments,
-            maxDegree,
-            GeomAbs_C1);
-        const Handle(Geom_BSplineSurface) surface = approximation.Surface();
-        if (surface.IsNull()) {
-            errorMessage = "strict C0 Plate approximation returned a null surface";
-            return false;
-        }
-
-        const Handle(TColGeom2d_HArray1OfCurve) platePCurves =
-            plateBuilder.Curves2d();
-        if (platePCurves.IsNull()
-            || platePCurves->Length()
-                != static_cast<Standard_Integer>(candidate.boundaryEdges.size())) {
-            errorMessage = "strict C0 Plate returned an unexpected pcurve count";
-            return false;
-        }
-        for (std::size_t edgeIndex = 0;
-             edgeIndex < candidate.boundaryEdges.size();
-             ++edgeIndex) {
-            const Handle(Geom2d_Curve) platePCurve =
-                platePCurves->Value(platePCurves->Lower()
-                    + static_cast<Standard_Integer>(edgeIndex));
-            if (platePCurve.IsNull()) {
-                errorMessage = "strict C0 Plate returned a null boundary pcurve";
-                return false;
-            }
-            boundaryPCurves.push_back(platePCurve);
-        }
-
-        BRep_Builder builder;
-        builder.MakeFace(
-            temporaryPatchFace,
-            surface,
-            TopLoc_Location(),
-            params_.fillingTolerance);
-        if (temporaryPatchFace.IsNull()) {
-            errorMessage = "strict C0 Plate returned a null temporary face";
-            return false;
-        }
-    }
-    catch (const Standard_Failure& failure) {
-        errorMessage = "OCCT failure while building strict C0 Plate patch: "
-            + failureText(failure);
+            plateData,
+            errorMessage)) {
         return false;
     }
-
-    return true;
+    return approximateStrictC0Plate(
+        plateData,
+        params_.surfaceApproximationTolerance,
+        params_.maxSurfaceApproximationDeviation,
+        maxDegree,
+        maxSegments,
+        params_.maxFillingPolesPerDirection,
+        params_.maxFillingControlPoints,
+        temporaryPatchFace,
+        boundaryPCurves,
+        g0Error,
+        g1Error,
+        metrics,
+        errorMessage);
 }
 
 bool HealSimpleHole::rebuildBSplinePatchWithOriginalBoundary(
@@ -1492,10 +1833,16 @@ bool HealSimpleHole::rebuildBSplinePatchWithOriginalBoundary(
     double g0Error,
     TopoDS_Face& patchFace,
     double& patchArea,
+    int& reprojectedEdgeCount,
+    int& reusedPlatePCurveCount,
+    double& maxSelectedPCurveDeviation,
     std::string& errorMessage) const
 {
     patchFace.Nullify();
     patchArea = 0.0;
+    reprojectedEdgeCount = 0;
+    reusedPlatePCurveCount = 0;
+    maxSelectedPCurveDeviation = 0.0;
     if (temporaryPatchFace.IsNull()) {
         errorMessage = "temporary B-spline patch face is null";
         return false;
@@ -1557,28 +1904,71 @@ bool HealSimpleHole::rebuildBSplinePatchWithOriginalBoundary(
             const double projectionPrecision = std::max(
                 Precision::Confusion(),
                 params_.pcurveTolerance);
-            Handle(Geom2d_Curve) projectedPCurve;
+            Handle(Geom2d_Curve) platePCurve;
             if (boundaryPCurves.size() == candidate.boundaryEdges.size()) {
-                projectedPCurve = boundaryPCurves[edgeIndex];
+                platePCurve = boundaryPCurves[edgeIndex];
             }
-            if (projectedPCurve.IsNull()) {
-                std::string projectionError;
-                if (!buildContinuousProjectedPCurve(
-                        originalEdgeUse,
-                        locatedFillingSurface,
-                        41,
-                        projectionPrecision,
-                        projectedPCurve,
-                        projectionError)) {
-                    errorMessage = "failed to build continuous boundary pcurve: "
-                        + projectionError;
-                    return false;
+
+            Handle(Geom2d_Curve) finalSurfacePCurve;
+            std::string projectionError;
+            if (params_.reprojectBoundaryOnFinalSurface) {
+                buildContinuousProjectedPCurve(
+                    originalEdgeUse,
+                    locatedFillingSurface,
+                    params_.finalBoundaryProjectionSamples,
+                    projectionPrecision,
+                    finalSurfacePCurve,
+                    projectionError);
+            }
+
+            double plateDeviation = std::numeric_limits<double>::infinity();
+            const bool plateDeviationMeasured = measurePCurveDeviation(
+                originalEdgeUse,
+                locatedFillingSurface,
+                platePCurve,
+                params_.finalBoundaryProjectionSamples,
+                plateDeviation);
+            double projectedDeviation = std::numeric_limits<double>::infinity();
+            const bool projectedDeviationMeasured = measurePCurveDeviation(
+                originalEdgeUse,
+                locatedFillingSurface,
+                finalSurfacePCurve,
+                params_.finalBoundaryProjectionSamples,
+                projectedDeviation);
+
+            Handle(Geom2d_Curve) selectedPCurve;
+            double selectedDeviation = std::numeric_limits<double>::infinity();
+            if (projectedDeviationMeasured
+                && (!plateDeviationMeasured
+                    || projectedDeviation <= plateDeviation)) {
+                selectedPCurve = finalSurfacePCurve;
+                selectedDeviation = projectedDeviation;
+                ++reprojectedEdgeCount;
+            }
+            else if (plateDeviationMeasured) {
+                selectedPCurve = platePCurve;
+                selectedDeviation = plateDeviation;
+                ++reusedPlatePCurveCount;
+            }
+
+            if (selectedPCurve.IsNull()) {
+                if (!params_.reprojectBoundaryOnFinalSurface) {
+                    projectionError = "final-surface reprojection is disabled";
                 }
+                else if (projectionError.empty()) {
+                    projectionError = "projected and Plate pcurves could not be measured";
+                }
+                errorMessage = "no measurable boundary pcurve is available: "
+                    + projectionError;
+                return false;
             }
+            maxSelectedPCurveDeviation = std::max(
+                maxSelectedPCurveDeviation,
+                selectedDeviation);
 
             builder.UpdateEdge(
                 originalEdgeUse,
-                projectedPCurve,
+                selectedPCurve,
                 locatedFillingSurface,
                 TopLoc_Location(),
                 requiredTolerance);
@@ -1916,7 +2306,13 @@ bool HealSimpleHole::tryRepairByLocalSewing(
                 boundaryPCurves,
                 g0Error,
                 g1Error,
-                errorMessage)) {
+                errorMessage,
+                params_.tryHighComplexityC0Fallback
+                    ? params_.fallbackFillingMaxDegree
+                    : params_.fillingMaxDegree,
+                params_.tryHighComplexityC0Fallback
+                    ? params_.fallbackFillingMaxSegments
+                    : params_.fillingMaxSegments)) {
             return false;
         }
 
@@ -2057,6 +2453,120 @@ bool HealSimpleHole::tryRepairByLocalSewing(
     return true;
 }
 
+bool HealSimpleHole::createTrialCandidate(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& trialShape,
+    Candidate& trialCandidate,
+    std::string& errorMessage) const
+{
+    trialShape.Nullify();
+    trialCandidate = candidate;
+    trialCandidate.boundaryWire.Nullify();
+    trialCandidate.boundaryEdges.clear();
+    trialCandidate.boundaryVertices.clear();
+    trialCandidate.boundaryOwnerFaces.clear();
+    trialCandidate.ownerFaces.clear();
+    trialCandidate.ownerShell.Nullify();
+    if (currentShape.IsNull() || candidate.ownerShell.IsNull()) {
+        errorMessage = "cannot create a trial candidate from a null shape or shell";
+        return false;
+    }
+
+    try {
+        // 完整复制 owner shell 的拓扑和几何；试算中的 SameParameter、PCurve 和
+        // tolerance 修改全部留在 trial 内，失败时可以真正丢弃。
+        BRepBuilderAPI_Copy copier(
+            candidate.ownerShell,
+            Standard_True,
+            Standard_False);
+        const TopoDS_Shape copiedOwnerShape = copier.Shape();
+        if (copiedOwnerShape.IsNull()
+            || copiedOwnerShape.ShapeType() != TopAbs_SHELL) {
+            errorMessage = "owner shell trial copy did not produce a shell";
+            return false;
+        }
+        trialCandidate.ownerShell = TopoDS::Shell(copiedOwnerShape);
+
+        const auto mapSubShape = [&copier](
+            const TopoDS_Shape& source,
+            TopAbs_ShapeEnum expectedType,
+            TopoDS_Shape& mapped) {
+            mapped = copier.ModifiedShape(source);
+            if (mapped.IsNull() || mapped.ShapeType() != expectedType) {
+                return false;
+            }
+            mapped.Orientation(source.Orientation());
+            return true;
+        };
+
+        BRepBuilderAPI_MakeWire wireBuilder;
+        for (const TopoDS_Edge& sourceEdge : candidate.boundaryEdges) {
+            TopoDS_Shape mappedShape;
+            if (!mapSubShape(sourceEdge, TopAbs_EDGE, mappedShape)) {
+                errorMessage = "cannot map a boundary edge to the trial shell";
+                return false;
+            }
+            const TopoDS_Edge mappedEdge = TopoDS::Edge(mappedShape);
+            trialCandidate.boundaryEdges.push_back(mappedEdge);
+            wireBuilder.Add(mappedEdge);
+        }
+        if (!wireBuilder.IsDone()) {
+            errorMessage = "cannot rebuild the boundary wire on the trial shell";
+            return false;
+        }
+        trialCandidate.boundaryWire = wireBuilder.Wire();
+
+        for (const TopoDS_Vertex& sourceVertex : candidate.boundaryVertices) {
+            TopoDS_Shape mappedShape;
+            if (!mapSubShape(sourceVertex, TopAbs_VERTEX, mappedShape)) {
+                errorMessage = "cannot map a boundary vertex to the trial shell";
+                return false;
+            }
+            trialCandidate.boundaryVertices.push_back(
+                TopoDS::Vertex(mappedShape));
+        }
+        for (const TopoDS_Face& sourceFace : candidate.boundaryOwnerFaces) {
+            TopoDS_Shape mappedShape;
+            if (!mapSubShape(sourceFace, TopAbs_FACE, mappedShape)) {
+                errorMessage = "cannot map a boundary owner face to the trial shell";
+                return false;
+            }
+            trialCandidate.boundaryOwnerFaces.push_back(
+                TopoDS::Face(mappedShape));
+        }
+        for (const TopoDS_Face& sourceFace : candidate.ownerFaces) {
+            TopoDS_Shape mappedShape;
+            if (!mapSubShape(sourceFace, TopAbs_FACE, mappedShape)) {
+                errorMessage = "cannot map an owner face to the trial shell";
+                return false;
+            }
+            trialCandidate.ownerFaces.push_back(TopoDS::Face(mappedShape));
+        }
+
+        TopoDS_Shell sourceKey = candidate.ownerShell;
+        sourceKey.Orientation(TopAbs_FORWARD);
+        TopoDS_Shell replacementValue = trialCandidate.ownerShell;
+        replacementValue.Orientation(TopAbs_FORWARD);
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(sourceKey, replacementValue);
+        trialShape = reshaper.Apply(currentShape);
+        if (trialShape.IsNull()
+            || trialShape.ShapeType() != currentShape.ShapeType()) {
+            errorMessage = "trial shell replacement produced an invalid root shape";
+            trialShape.Nullify();
+            return false;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while creating a trial candidate: "
+            + failureText(failure);
+        trialShape.Nullify();
+        return false;
+    }
+    return true;
+}
+
 bool HealSimpleHole::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
     const Candidate& candidate,
@@ -2064,30 +2574,37 @@ bool HealSimpleHole::tryRepairCandidate(
     std::string& errorMessage)
 {
     repairedShape.Nullify();
-    const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
-
     std::vector<std::string> strategyFailures;
 
     if (params_.tryPlanarPatch) {
+        TopoDS_Shape trialShape;
+        Candidate trialCandidate;
         TopoDS_Face patchFace;
         double patchArea = 0.0;
         std::string strategyError;
-        if (buildPlanarPatchFace(
+        if (createTrialCandidate(
+                currentShape,
                 candidate,
+                trialShape,
+                trialCandidate,
+                strategyError)
+            && buildPlanarPatchFace(
+                trialCandidate,
                 patchFace,
                 patchArea,
                 strategyError)
             && tryCommitPatchFace(
-                currentShape,
-                candidate,
+                trialShape,
+                trialCandidate,
                 patchFace,
-                candidate.boundaryEdges,
-                freeEdgesBefore,
+                trialCandidate.boundaryEdges,
+                TopologyUtils::CountFreeEdges(trialShape),
                 repairedShape,
                 strategyError)) {
             std::ostringstream success;
             success << "Planar patch accepted: area=" << patchArea
-                    << ", freeEdgesBefore=" << freeEdgesBefore
+                    << ", freeEdgesBefore="
+                    << TopologyUtils::CountFreeEdges(trialShape)
                     << ", freeEdgesAfter="
                     << TopologyUtils::CountFreeEdges(repairedShape);
             appendMessage(success.str());
@@ -2102,58 +2619,91 @@ bool HealSimpleHole::tryRepairCandidate(
     const auto tryBSplineStrategy = [this,
                                      &currentShape,
                                      &candidate,
-                                     freeEdgesBefore,
                                      &repairedShape](
                                         bool useG1,
-                                        bool useHighComplexityC0,
+                                        const FillingComplexityLevel& level,
+                                        const StrictC0PlateData* preparedC0Plate,
                                         std::string& strategyError) {
+        TopoDS_Shape trialShape;
+        Candidate trialCandidate;
         BRepFill_Filling filling;
         TopoDS_Face temporaryPatchFace;
         std::vector<Handle(Geom2d_Curve)> boundaryPCurves;
         double g0Error = 0.0;
         double g1Error = 0.0;
-        const bool patchBuilt = useHighComplexityC0
-            ? buildStrictC0BSplinePatchFace(
-                candidate,
-                temporaryPatchFace,
-                boundaryPCurves,
-                g0Error,
-                g1Error,
-                strategyError,
-                params_.fallbackFillingMaxDegree,
-                params_.fallbackFillingMaxSegments)
-            : buildTemporaryBSplinePatchFace(
-                candidate,
-                useG1,
-                filling,
-                temporaryPatchFace,
-                boundaryPCurves,
-                g0Error,
-                g1Error,
-                strategyError);
-        if (!patchBuilt) {
-            return false;
+        SurfaceApproximationMetrics approximationMetrics;
+        if (useG1) {
+            if (!createTrialCandidate(
+                    currentShape,
+                    candidate,
+                    trialShape,
+                    trialCandidate,
+                    strategyError)
+                || !buildTemporaryBSplinePatchFace(
+                    trialCandidate,
+                    Standard_True,
+                    filling,
+                    temporaryPatchFace,
+                    boundaryPCurves,
+                    g0Error,
+                    g1Error,
+                    strategyError,
+                    level.maxDegree,
+                    level.maxSegments)) {
+                return false;
+            }
+        }
+        else {
+            if (preparedC0Plate == nullptr
+                || !approximateStrictC0Plate(
+                    *preparedC0Plate,
+                    params_.surfaceApproximationTolerance,
+                    params_.maxSurfaceApproximationDeviation,
+                    level.maxDegree,
+                    level.maxSegments,
+                    params_.maxFillingPolesPerDirection,
+                    params_.maxFillingControlPoints,
+                    temporaryPatchFace,
+                    boundaryPCurves,
+                    g0Error,
+                    g1Error,
+                    approximationMetrics,
+                    strategyError)
+                || !createTrialCandidate(
+                    currentShape,
+                    candidate,
+                    trialShape,
+                    trialCandidate,
+                    strategyError)) {
+                return false;
+            }
         }
 
         TopoDS_Face patchFace;
         double patchArea = 0.0;
+        int reprojectedEdgeCount = 0;
+        int reusedPlatePCurveCount = 0;
+        double maxSelectedPCurveDeviation = 0.0;
         if (!rebuildBSplinePatchWithOriginalBoundary(
-                candidate,
+                trialCandidate,
                 temporaryPatchFace,
                 boundaryPCurves,
                 g0Error,
                 patchFace,
                 patchArea,
+                reprojectedEdgeCount,
+                reusedPlatePCurveCount,
+                maxSelectedPCurveDeviation,
                 strategyError)) {
             return false;
         }
 
         if (!tryCommitPatchFace(
-                currentShape,
-                candidate,
+                trialShape,
+                trialCandidate,
                 patchFace,
-                candidate.boundaryEdges,
-                freeEdgesBefore,
+                trialCandidate.boundaryEdges,
+                TopologyUtils::CountFreeEdges(trialShape),
                 repairedShape,
                 strategyError)) {
             return false;
@@ -2161,21 +2711,39 @@ bool HealSimpleHole::tryRepairCandidate(
 
         std::ostringstream success;
         success << "B-spline "
-                << (useG1
-                    ? "G1"
-                    : (useHighComplexityC0 ? "strict C0 fallback" : "C0"))
+                << (useG1 ? "G1" : "progressive C0")
                 << " patch accepted: area=" << patchArea
+                << ", requestedMaxDegree=" << level.maxDegree
+                << ", requestedMaxSegments=" << level.maxSegments
+                << ", extendedFallback="
+                << (level.extendedFallback ? "true" : "false")
                 << ", g0Error=" << g0Error;
         if (useG1) {
             success << ", g1Error=" << g1Error;
         }
+        else {
+            success << ", approximationError="
+                    << approximationMetrics.approximationError
+                    << ", criterionError="
+                    << approximationMetrics.criterionError
+                    << ", approximationMethod="
+                    << approximationMetrics.method;
+        }
+        success << ", reprojectedEdges=" << reprojectedEdgeCount
+                << ", reusedPlatePCurves=" << reusedPlatePCurveCount
+                << ", sampledPCurveDeviation="
+                << maxSelectedPCurveDeviation;
         const Handle(Geom_BSplineSurface) patchSurface =
             Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(patchFace));
         if (!patchSurface.IsNull()) {
             success << ", uDegree=" << patchSurface->UDegree()
                     << ", vDegree=" << patchSurface->VDegree()
                     << ", uPoles=" << patchSurface->NbUPoles()
-                    << ", vPoles=" << patchSurface->NbVPoles();
+                    << ", vPoles=" << patchSurface->NbVPoles()
+                    << ", uC1="
+                    << (patchSurface->IsCNu(1) ? "true" : "false")
+                    << ", vC1="
+                    << (patchSurface->IsCNv(1) ? "true" : "false");
         }
         success << ", freeEdgesAfter="
                 << TopologyUtils::CountFreeEdges(repairedShape);
@@ -2184,43 +2752,110 @@ bool HealSimpleHole::tryRepairCandidate(
     };
 
     if (params_.tryBSplineG1Patch) {
-        std::string strategyError;
-        if (tryBSplineStrategy(Standard_True, Standard_False, strategyError)) {
-            return true;
+        const std::vector<FillingComplexityLevel> levels =
+            buildComplexityLevels(
+                params_.approximationMinDegree,
+                params_.approximationMinSegments,
+                params_.approximationDegreeStep,
+                params_.approximationSegmentStep,
+                params_.fillingMaxDegree,
+                params_.fillingMaxSegments,
+                Standard_False,
+                params_.fallbackFillingMaxDegree,
+                params_.fallbackFillingMaxSegments,
+                params_.fillingMaxSegments);
+        for (const FillingComplexityLevel& level : levels) {
+            std::string strategyError;
+            if (tryBSplineStrategy(
+                    Standard_True,
+                    level,
+                    nullptr,
+                    strategyError)) {
+                return true;
+            }
+            std::ostringstream strategyName;
+            strategyName << "BSplineG1[d=" << level.maxDegree
+                         << ",s=" << level.maxSegments << "]";
+            strategyFailures.push_back(
+                RepairDiagnostics::StrategyFailureBlock(
+                    strategyName.str(),
+                    strategyError));
+            if (params_.verbose) {
+                appendMessage(strategyName.str() + " failed: " + strategyError);
+            }
         }
-        strategyFailures.push_back(
-            RepairDiagnostics::StrategyFailureBlock(
-                "BSplineG1Patch",
-                strategyError));
     }
 
     if (params_.tryBSplineC0Patch) {
-        std::string strategyError;
-        if (tryBSplineStrategy(Standard_False, Standard_False, strategyError)) {
-            return true;
+        StrictC0PlateData preparedC0Plate;
+        std::string preparationError;
+        const bool platePrepared = prepareStrictC0Plate(
+            candidate.boundaryEdges,
+            params_.fillingDegree,
+            params_.fillingPointsOnCurve,
+            params_.fillingIterations,
+            params_.fillingTolerance,
+            params_.fillingAngularTolerance,
+            params_.fillingCurvatureTolerance,
+            params_.maxFillingG0Error,
+            preparedC0Plate,
+            preparationError);
+        if (!platePrepared) {
+            strategyFailures.push_back(
+                RepairDiagnostics::StrategyFailureBlock(
+                    "BSplineC0Plate",
+                    preparationError));
         }
-        strategyFailures.push_back(
-            RepairDiagnostics::StrategyFailureBlock(
-                "BSplineC0Patch",
-                strategyError));
-    }
-
-    if (params_.tryBSplineC0Patch && params_.tryHighComplexityC0Fallback) {
-        std::string strategyError;
-        if (tryBSplineStrategy(Standard_False, Standard_True, strategyError)) {
-            return true;
+        const std::vector<FillingComplexityLevel> levels =
+            buildComplexityLevels(
+                params_.approximationMinDegree,
+                params_.approximationMinSegments,
+                params_.approximationDegreeStep,
+                params_.approximationSegmentStep,
+                params_.fillingMaxDegree,
+                params_.fillingMaxSegments,
+                params_.tryHighComplexityC0Fallback,
+                params_.fallbackFillingMaxDegree,
+                params_.fallbackFillingMaxSegments,
+                params_.lowestDegreeMaxSegments);
+        for (const FillingComplexityLevel& level : levels) {
+            if (!platePrepared) {
+                break;
+            }
+            std::string strategyError;
+            if (tryBSplineStrategy(
+                    Standard_False,
+                    level,
+                    &preparedC0Plate,
+                    strategyError)) {
+                return true;
+            }
+            std::ostringstream strategyName;
+            strategyName << "BSplineC0[d=" << level.maxDegree
+                         << ",s=" << level.maxSegments << "]";
+            strategyFailures.push_back(
+                RepairDiagnostics::StrategyFailureBlock(
+                    strategyName.str(),
+                    strategyError));
+            if (params_.verbose) {
+                appendMessage(strategyName.str() + " failed: " + strategyError);
+            }
         }
-        strategyFailures.push_back(
-            RepairDiagnostics::StrategyFailureBlock(
-                "BSplineC0HighComplexityFallback",
-                strategyError));
     }
 
     if (params_.useLocalSewingFallback) {
+        TopoDS_Shape trialShape;
+        Candidate trialCandidate;
         std::string strategyError;
-        if (tryRepairByLocalSewing(
+        if (createTrialCandidate(
                 currentShape,
                 candidate,
+                trialShape,
+                trialCandidate,
+                strategyError)
+            && tryRepairByLocalSewing(
+                trialShape,
+                trialCandidate,
                 repairedShape,
                 strategyError)) {
             return true;
