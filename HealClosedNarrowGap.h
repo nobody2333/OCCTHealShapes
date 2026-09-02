@@ -299,6 +299,19 @@ private:
         double& g0Error,
         std::string& errorMessage) const;
 
+    // 根据保留边界另一侧 face 的 edge-use 方向确定补面方向，避免继承异常旧 face 的法线。
+    bool orientDeleteAndFillPatchFace(
+        const DeleteAndFillPlan& plan,
+        TopoDS_Face& patchFace,
+        bool& reversedPatchFace,
+        std::string& errorMessage) const;
+
+    // 补面提交前检查每条边界 edge 在两个相邻 face 中是否以相反方向使用。
+    bool validateDeleteAndFillBoundaryOrientations(
+        const TopoDS_Shape& shape,
+        const EdgeChain& boundary,
+        std::string& errorMessage) const;
+
     bool tryRepairBySideReplacement(
         const TopoDS_Shape& currentShape,
         const ClosedGapCandidate& candidate,

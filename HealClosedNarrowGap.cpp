@@ -238,6 +238,48 @@ bool isBoundaryEdgeUsable(const TopoDS_Edge& edge, const TopoDS_Face& ownerFace)
     return GeometryUtils::ComputeEdgeLength(edge) > Precision::Confusion();
 }
 
+// 读取 edge 在指定有向 face 中的唯一 edge use 方向。
+// TopExp_Explorer 会累计 face orientation，因此该方向可直接用于 shell 邻接关系检查。
+bool findUniqueEdgeUseOrientation(
+    const TopoDS_Face& face,
+    const TopoDS_Edge& edge,
+    TopAbs_Orientation& orientation,
+    std::string& errorMessage)
+{
+    if (face.IsNull() || edge.IsNull()) {
+        errorMessage = "face or edge is null while checking boundary orientation";
+        return false;
+    }
+
+    int useCount = 0;
+    for (TopExp_Explorer edgeExplorer(face, TopAbs_EDGE);
+         edgeExplorer.More();
+         edgeExplorer.Next()) {
+        const TopoDS_Edge edgeUse = TopoDS::Edge(edgeExplorer.Current());
+        if (!edgeUse.IsSame(edge)) {
+            continue;
+        }
+
+        if (edgeUse.Orientation() != TopAbs_FORWARD &&
+            edgeUse.Orientation() != TopAbs_REVERSED) {
+            errorMessage =
+                "boundary edge use has INTERNAL or EXTERNAL orientation";
+            return false;
+        }
+        orientation = edgeUse.Orientation();
+        ++useCount;
+    }
+
+    if (useCount != 1) {
+        std::ostringstream message;
+        message << "boundary edge does not have exactly one use in face: uses="
+                << useCount;
+        errorMessage = message.str();
+        return false;
+    }
+    return true;
+}
+
 std::vector<BoundaryLoop> buildBoundaryLoops(const TopoDS_Shape& shape)
 {
     std::vector<BoundaryLoop> loops;
@@ -4326,6 +4368,141 @@ bool HealClosedNarrowGap::buildDeleteAndFillPatchFace(
     return true;
 }
 
+bool HealClosedNarrowGap::orientDeleteAndFillPatchFace(
+    const DeleteAndFillPlan& plan,
+    TopoDS_Face& patchFace,
+    bool& reversedPatchFace,
+    std::string& errorMessage) const
+{
+    reversedPatchFace = false;
+    if (patchFace.IsNull() ||
+        plan.boundary.edges.empty() ||
+        plan.boundary.ownerFaces.size() != plan.boundary.edges.size()) {
+        errorMessage =
+            "delete-and-fill patch or surviving boundary data is invalid";
+        return false;
+    }
+
+    // 先以支撑面的正向法线为基准比较。若每条共享边都与相邻 face 同向，
+    // 说明整个 patch face 应翻转；混合结果则无法通过一次整体翻转修正。
+    TopoDS_Face forwardPatchFace = patchFace;
+    forwardPatchFace.Orientation(TopAbs_FORWARD);
+    int sameDirectionCount = 0;
+    int oppositeDirectionCount = 0;
+    for (std::size_t edgeIndex = 0;
+         edgeIndex < plan.boundary.edges.size();
+         ++edgeIndex) {
+        TopAbs_Orientation patchEdgeOrientation = TopAbs_FORWARD;
+        TopAbs_Orientation ownerEdgeOrientation = TopAbs_FORWARD;
+        std::string orientationError;
+        if (!findUniqueEdgeUseOrientation(
+                forwardPatchFace,
+                plan.boundary.edges[edgeIndex],
+                patchEdgeOrientation,
+                orientationError)) {
+            errorMessage = "failed to read patch boundary orientation: "
+                + orientationError;
+            return false;
+        }
+        if (!findUniqueEdgeUseOrientation(
+                plan.boundary.ownerFaces[edgeIndex],
+                plan.boundary.edges[edgeIndex],
+                ownerEdgeOrientation,
+                orientationError)) {
+            errorMessage = "failed to read surviving face boundary orientation: "
+                + orientationError;
+            return false;
+        }
+
+        if (patchEdgeOrientation == ownerEdgeOrientation) {
+            ++sameDirectionCount;
+        }
+        else {
+            ++oppositeDirectionCount;
+        }
+    }
+
+    if (sameDirectionCount > 0 && oppositeDirectionCount > 0) {
+        std::ostringstream message;
+        message << "surviving faces require inconsistent patch orientations: sameDirectionEdges="
+                << sameDirectionCount
+                << ", oppositeDirectionEdges=" << oppositeDirectionCount;
+        errorMessage = message.str();
+        return false;
+    }
+
+    reversedPatchFace = sameDirectionCount > 0;
+    patchFace.Orientation(
+        reversedPatchFace ? TopAbs_REVERSED : TopAbs_FORWARD);
+    return true;
+}
+
+bool HealClosedNarrowGap::validateDeleteAndFillBoundaryOrientations(
+    const TopoDS_Shape& shape,
+    const EdgeChain& boundary,
+    std::string& errorMessage) const
+{
+    if (shape.IsNull() || boundary.edges.empty()) {
+        errorMessage =
+            "shape or delete-and-fill boundary is invalid for orientation validation";
+        return false;
+    }
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(shape, edgeFaceMap);
+    for (std::size_t edgeIndex = 0;
+         edgeIndex < boundary.edges.size();
+         ++edgeIndex) {
+        const TopoDS_Edge& boundaryEdge = boundary.edges[edgeIndex];
+        if (boundaryEdge.IsNull() || !edgeFaceMap.Contains(boundaryEdge)) {
+            errorMessage =
+                "delete-and-fill boundary edge is missing during orientation validation";
+            return false;
+        }
+
+        const TopTools_ListOfShape& adjacentFaces =
+            edgeFaceMap.FindFromKey(boundaryEdge);
+        if (listExtent(adjacentFaces) != 2) {
+            std::ostringstream message;
+            message << "delete-and-fill boundary edge does not have exactly two adjacent faces: edgeIndex="
+                    << edgeIndex
+                    << ", adjacentFaces=" << listExtent(adjacentFaces);
+            errorMessage = message.str();
+            return false;
+        }
+
+        TopAbs_Orientation orientations[2] = {
+            TopAbs_FORWARD,
+            TopAbs_FORWARD
+        };
+        int faceIndex = 0;
+        for (TopTools_ListIteratorOfListOfShape faceIterator(adjacentFaces);
+             faceIterator.More();
+             faceIterator.Next(), ++faceIndex) {
+            std::string orientationError;
+            if (!findUniqueEdgeUseOrientation(
+                    TopoDS::Face(faceIterator.Value()),
+                    boundaryEdge,
+                    orientations[faceIndex],
+                    orientationError)) {
+                errorMessage =
+                    "failed to validate delete-and-fill boundary orientation: "
+                    + orientationError;
+                return false;
+            }
+        }
+
+        if (orientations[0] == orientations[1]) {
+            std::ostringstream message;
+            message << "delete-and-fill boundary edge has the same orientation in both adjacent faces: edgeIndex="
+                    << edgeIndex;
+            errorMessage = message.str();
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
     const TopoDS_Shape& currentShape,
     const ClosedGapCandidate& candidate,
@@ -4361,15 +4538,49 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
         return false;
     }
 
+    bool reversedPatchFace = false;
+    if (!orientDeleteAndFillPatchFace(
+            plan,
+            patchFace,
+            reversedPatchFace,
+            errorMessage)) {
+        errorMessage = "failed to orient DeleteAndFill patch face: "
+            + errorMessage;
+        return false;
+    }
+    {
+        std::ostringstream message;
+        message << "DeleteAndFill patch orientation: reversedAgainstSurface="
+                << (reversedPatchFace ? "true" : "false")
+                << ", boundaryEdges=" << plan.boundary.edges.size();
+        appendMessage(message.str());
+    }
+
     const int freeEdgesBefore = TopologyUtils::CountFreeEdges(currentShape);
     TopoDS_Shape trialShape;
     TopoDS_Shape locallyReplacedShape;
     try {
-        // 规范化 Replace 的键和值，让 ReShape 按原 face use 传递局部方向。
+        // source key 仍规范为 FORWARD，但 replacement value 编码“旧 face use ->
+        // 已按 surviving faces 定向的 patch face use”的相对方向，不能继续盲目继承旧方向。
         TopoDS_Face sourceKey = plan.defectiveFace;
         sourceKey.Orientation(TopAbs_FORWARD);
         TopoDS_Face replacementValue = patchFace;
-        replacementValue.Orientation(TopAbs_FORWARD);
+        const TopAbs_Orientation sourceUseOrientation =
+            plan.defectiveFace.Orientation();
+        const TopAbs_Orientation desiredPatchOrientation =
+            patchFace.Orientation();
+        if ((sourceUseOrientation != TopAbs_FORWARD &&
+             sourceUseOrientation != TopAbs_REVERSED) ||
+            (desiredPatchOrientation != TopAbs_FORWARD &&
+             desiredPatchOrientation != TopAbs_REVERSED)) {
+            errorMessage =
+                "defective or replacement face has unsupported orientation";
+            return false;
+        }
+        replacementValue.Orientation(
+            sourceUseOrientation == desiredPatchOrientation
+                ? TopAbs_FORWARD
+                : TopAbs_REVERSED);
 
         BRepTools_ReShape reshaper;
         reshaper.Replace(sourceKey, replacementValue);
@@ -4377,6 +4588,17 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
         if (trialShape.IsNull()) {
             errorMessage =
                 "replacing the defective face produced a null shape";
+            return false;
+        }
+
+        std::string boundaryOrientationError;
+        if (!validateDeleteAndFillBoundaryOrientations(
+                trialShape,
+                plan.boundary,
+                boundaryOrientationError)) {
+            errorMessage =
+                "DeleteAndFill local replacement has inconsistent face orientation: "
+                + boundaryOrientationError;
             return false;
         }
         locallyReplacedShape = trialShape;
@@ -4433,26 +4655,42 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
         return false;
     }
 
+    auto validateDeleteAndFillResult = [&](
+        const TopoDS_Shape& shape,
+        std::string& validationError) {
+        if (!validateRepairResult(
+                currentShape,
+                shape,
+                plan.boundary,
+                plan.removedEdges,
+                freeEdgesBefore,
+                validationError)) {
+            return false;
+        }
+
+        std::string boundaryOrientationError;
+        if (!validateDeleteAndFillBoundaryOrientations(
+                shape,
+                plan.boundary,
+                boundaryOrientationError)) {
+            validationError =
+                "DeleteAndFill boundary orientation validation failed: "
+                + boundaryOrientationError;
+            return false;
+        }
+        return true;
+    };
+
     std::string validationError;
-    if (!validateRepairResult(
-            currentShape,
-            trialShape,
-            plan.boundary,
-            plan.removedEdges,
-            freeEdgesBefore,
-            validationError)) {
+    if (!validateDeleteAndFillResult(trialShape, validationError)) {
         std::string localValidationError;
         const bool canUseLocalResult =
             params_.runShapeFixAfterRepair &&
             !locallyReplacedShape.IsNull() &&
             !trialShape.IsSame(locallyReplacedShape) &&
             defectiveFaceWasRemoved(locallyReplacedShape) &&
-            validateRepairResult(
-                currentShape,
+            validateDeleteAndFillResult(
                 locallyReplacedShape,
-                plan.boundary,
-                plan.removedEdges,
-                freeEdgesBefore,
                 localValidationError);
         if (!canUseLocalResult) {
             errorMessage = validationError;
