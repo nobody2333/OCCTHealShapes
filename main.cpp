@@ -481,6 +481,9 @@ int runShapeRepairPipeline(const std::string& fileName) {
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
 
+    // 性能对照：关闭 HealNarrowGap 的 crossed-face 两级兜底策略。
+    narrowGapParams.enableCrossedFaceBoundaryRepair = false;
+
     // 与独立入口共用 HealSimpleHole::Params 中的默认配置。
 
 	closedNarrowGapParams.midlineConstructionMode = HealClosedNarrowGap::MidlineConstructionMode::ProjectionCorrespondence;

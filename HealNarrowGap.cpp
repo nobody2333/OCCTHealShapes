@@ -11,13 +11,18 @@
 
 #include <BRep_Builder.hxx>
 #include <BRepAlgoAPI_Section.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_FindPlane.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepFill_Filling.hxx>
 #include <BRepLib.hxx>
+#include <BRepLib_CheckCurveOnSurface.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <Extrema_ExtPC.hxx>
 #include <Extrema_POnCurv.hxx>
@@ -25,8 +30,10 @@
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Geometry.hxx>
+#include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
@@ -35,12 +42,14 @@
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Wire.hxx>
+#include <ShapeConstruct_ProjectCurveOnSurface.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Shell.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TColgp_Array1OfPnt.hxx>
@@ -206,6 +215,56 @@ bool findFacesForSameEdge(const TopTools_IndexedDataMapOfShapeListOfShape& edgeF
 
     return !faces.IsEmpty();
 }
+
+bool containsSameEdge(
+    const std::vector<TopoDS_Edge>& edges,
+    const TopoDS_Edge& target)
+{
+    for (const TopoDS_Edge& edge : edges) {
+        if (!edge.IsNull() && edge.IsSame(target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 返回 edge 在有向 face 中累计 face orientation 后的唯一 edge-use 方向。
+bool findUniqueEdgeUseOrientation(
+    const TopoDS_Face& face,
+    const TopoDS_Edge& edge,
+    TopAbs_Orientation& orientation,
+    std::string& errorMessage)
+{
+    if (face.IsNull() || edge.IsNull()) {
+        errorMessage = "face or edge is null while reading edge-use orientation";
+        return false;
+    }
+
+    int useCount = 0;
+    for (TopExp_Explorer edgeExplorer(face, TopAbs_EDGE);
+         edgeExplorer.More();
+         edgeExplorer.Next()) {
+        const TopoDS_Edge edgeUse = TopoDS::Edge(edgeExplorer.Current());
+        if (!edgeUse.IsSame(edge)) {
+            continue;
+        }
+        if (edgeUse.Orientation() != TopAbs_FORWARD &&
+            edgeUse.Orientation() != TopAbs_REVERSED) {
+            errorMessage = "edge use has INTERNAL or EXTERNAL orientation";
+            return false;
+        }
+        orientation = edgeUse.Orientation();
+        ++useCount;
+    }
+
+    if (useCount != 1) {
+        std::ostringstream message;
+        message << "edge does not have exactly one use in face: uses=" << useCount;
+        errorMessage = message.str();
+        return false;
+    }
+    return true;
+}
 }
 
 // 构造时规范化参数，避免采样数和迭代数出现无效值。
@@ -244,6 +303,17 @@ HealNarrowGap::HealNarrowGap(const Params& params)
     myParams.maxPCurveTol = std::max(myParams.maxPCurveTol, myParams.pcurveTol);
     myParams.faceTol = std::max(myParams.faceTol, Precision::Confusion());
     myParams.maxFaceTol = std::max(myParams.maxFaceTol, myParams.faceTol);
+    if (!std::isfinite(myParams.maxBoundaryToSurfaceDeviation) ||
+        myParams.maxBoundaryToSurfaceDeviation <= Precision::Confusion()) {
+        myParams.maxBoundaryToSurfaceDeviation = 1.0e-3;
+    }
+    if (!std::isfinite(myParams.maxRebuiltEdgeTolerance) ||
+        myParams.maxRebuiltEdgeTolerance <= Precision::Confusion()) {
+        myParams.maxRebuiltEdgeTolerance = 1.0e-3;
+    }
+    myParams.maxRebuiltEdgeTolerance = std::max(
+        myParams.maxRebuiltEdgeTolerance,
+        myParams.pcurveTol);
     myParams.shapeFixPrecision = std::max(myParams.shapeFixPrecision, Precision::Confusion());
     myParams.shapeFixMaxTolerance = std::max(myParams.shapeFixMaxTolerance, myParams.shapeFixPrecision);
     myParams.sampleCount = std::max(2, myParams.sampleCount);
@@ -952,9 +1022,14 @@ bool HealNarrowGap::tryRepairCandidate(
         return tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, errorMessage);
     }
 
+    // Auto 先保留原有三种策略的顺序，再把 crossed-face 两级修复作为最后兜底。
     std::string sideError;
     if (sideGapAllowed) {
-        if (tryRepairByReplacingOneSide(currentShape, candidate, repairedShape, sideError)) {
+        if (tryRepairByReplacingOneSide(
+                currentShape,
+                candidate,
+                repairedShape,
+                sideError)) {
             return true;
         }
     }
@@ -966,7 +1041,6 @@ bool HealNarrowGap::tryRepairCandidate(
         sideError = os.str();
     }
 
-    // Auto: 先做一侧替换；失败后优先尝试 face-face 交线，再用空间中线兜底。
     std::string surfaceIntersectionError;
     if (surfaceIntersectionGapAllowed) {
         if (tryRepairBySurfaceIntersection(
@@ -975,65 +1049,112 @@ bool HealNarrowGap::tryRepairCandidate(
                 repairedShape,
                 surfaceIntersectionError)) {
             if (!sideError.empty()) {
-                std::ostringstream os;
-                os << "Warning: repaired by surface intersection after earlier strategy failed:"
-                   << "\n" << RepairDiagnostics::IndentMultiline(
-                       RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ");
-                appendMessage(messages_, os.str());
+                std::ostringstream warning;
+                warning << "Warning: repaired by surface intersection after one-side replacement failed:"
+                        << "\n" << RepairDiagnostics::IndentMultiline(
+                            RepairDiagnostics::StrategyFailureBlock(
+                                "ReplaceOneSide",
+                                sideError),
+                            "  ");
+                appendMessage(messages_, warning.str());
             }
             return true;
         }
     }
     else {
-        std::ostringstream os;
-        os << "surface intersection gap too large: maxGap=" << candidate.maxGap
-           << ", surfaceIntersectionMaxGap=" << myParams.surfaceIntersectionMaxGap
-           << ", candidateMaxGap=" << myParams.candidateMaxGap;
-        surfaceIntersectionError = os.str();
-    }
-
-    if (!midlineGapAllowed) {
-        std::ostringstream os;
-        std::ostringstream midlineGapError;
-        midlineGapError << "midline gap too large: maxGap=" << candidate.maxGap
-                        << ", midlineMaxGap=" << myParams.midlineMaxGap;
-        os << "Auto repair failed:"
-           << "\n" << RepairDiagnostics::IndentMultiline(
-               RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ")
-           << "\n" << RepairDiagnostics::IndentMultiline(
-               RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
-           << "\n" << RepairDiagnostics::IndentMultiline(
-               RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineGapError.str()), "  ");
-        errorMessage = os.str();
-        return false;
+        std::ostringstream message;
+        message << "surface intersection gap too large: maxGap=" << candidate.maxGap
+                << ", surfaceIntersectionMaxGap="
+                << myParams.surfaceIntersectionMaxGap
+                << ", candidateMaxGap=" << myParams.candidateMaxGap;
+        surfaceIntersectionError = message.str();
     }
 
     std::string midlineError;
-    if (tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, midlineError)) {
-        if (!sideError.empty()) {
-            std::ostringstream os;
-            os << "Warning: repaired by midline collapse after earlier strategies failed:"
-               << "\n" << RepairDiagnostics::IndentMultiline(
-                   RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ")
-               << "\n" << RepairDiagnostics::IndentMultiline(
-                   RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ");
-            appendMessage(messages_, os.str());
+    if (midlineGapAllowed) {
+        if (tryRepairByMidlineCollapse(
+                currentShape,
+                candidate,
+                repairedShape,
+                midlineError)) {
+            std::ostringstream warning;
+            warning << "Warning: repaired by midline collapse after earlier strategies failed:"
+                    << "\n" << RepairDiagnostics::IndentMultiline(
+                        RepairDiagnostics::StrategyFailureBlock(
+                            "ReplaceOneSide",
+                            sideError),
+                        "  ")
+                    << "\n" << RepairDiagnostics::IndentMultiline(
+                        RepairDiagnostics::StrategyFailureBlock(
+                            "SurfaceIntersection",
+                            surfaceIntersectionError),
+                        "  ");
+            appendMessage(messages_, warning.str());
+            return true;
         }
+    }
+    else {
+        std::ostringstream message;
+        message << "midline gap too large: maxGap=" << candidate.maxGap
+                << ", midlineMaxGap=" << myParams.midlineMaxGap;
+        midlineError = message.str();
+    }
+
+    std::string crossedFaceError;
+    if (myParams.enableCrossedFaceBoundaryRepair &&
+        tryRepairByRebuildingCrossedFaceBoundary(
+            currentShape,
+            candidate,
+            repairedShape,
+            crossedFaceError)) {
+        std::ostringstream warning;
+        warning << "Warning: repaired by crossed-face boundary rebuild after earlier strategies failed:"
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "ReplaceOneSide",
+                        sideError),
+                    "  ")
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "SurfaceIntersection",
+                        surfaceIntersectionError),
+                    "  ")
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "MidlineCollapse",
+                        midlineError),
+                    "  ");
+        appendMessage(messages_, warning.str());
         return true;
+    }
+    if (!myParams.enableCrossedFaceBoundaryRepair) {
+        crossedFaceError = "crossed-face boundary repair is disabled";
     }
 
     {
-        std::ostringstream os;
-        os << "Auto repair failed:";
-        if (!sideError.empty()) {
-            os << "\n" << RepairDiagnostics::IndentMultiline(
-                RepairDiagnostics::StrategyFailureBlock("ReplaceOneSide", sideError), "  ");
-        }
-        os << "\n" << RepairDiagnostics::IndentMultiline(
-            RepairDiagnostics::StrategyFailureBlock("SurfaceIntersection", surfaceIntersectionError), "  ")
-           << "\n" << RepairDiagnostics::IndentMultiline(
-               RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ");
-        errorMessage = os.str();
+        std::ostringstream message;
+        message << "Auto repair failed:"
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "ReplaceOneSide",
+                        sideError),
+                    "  ")
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "SurfaceIntersection",
+                        surfaceIntersectionError),
+                    "  ")
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "MidlineCollapse",
+                        midlineError),
+                    "  ")
+                << "\n" << RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "CrossedFaceBoundary",
+                        crossedFaceError),
+                    "  ");
+        errorMessage = message.str();
     }
     return false;
 }
@@ -1257,6 +1378,1071 @@ bool HealNarrowGap::tryRepairByReplacingOneSide(
     }
 
     repairedShape = trialShape;
+    return true;
+}
+
+bool HealNarrowGap::createIsolatedCandidateTrial(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& trialShape,
+    Candidate& trialCandidate,
+    std::string& errorMessage) const
+{
+    trialShape.Nullify();
+    trialCandidate = candidate;
+    if (currentShape.IsNull() ||
+        candidate.edgeA.IsNull() || candidate.edgeB.IsNull() ||
+        candidate.faceA.IsNull() || candidate.faceB.IsNull()) {
+        errorMessage = "cannot create an isolated trial from a null candidate";
+        return false;
+    }
+
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape faceShellMap;
+        TopologyUtils::BuildFaceShellMap(currentShape, faceShellMap);
+        if (!faceShellMap.Contains(candidate.faceA) ||
+            !faceShellMap.Contains(candidate.faceB)) {
+            errorMessage = "candidate faces do not belong to an owner shell";
+            return false;
+        }
+
+        const TopTools_ListOfShape& shellsA =
+            faceShellMap.FindFromKey(candidate.faceA);
+        const TopTools_ListOfShape& shellsB =
+            faceShellMap.FindFromKey(candidate.faceB);
+        if (shellsA.Extent() != 1 || shellsB.Extent() != 1) {
+            errorMessage = "candidate faces do not have one unique owner shell";
+            return false;
+        }
+
+        const TopoDS_Shell ownerShellA = TopoDS::Shell(shellsA.First());
+        const TopoDS_Shell ownerShellB = TopoDS::Shell(shellsB.First());
+        if (ownerShellA.IsNull() || ownerShellB.IsNull() ||
+            !ownerShellA.IsSame(ownerShellB)) {
+            errorMessage = "candidate faces do not belong to the same owner shell";
+            return false;
+        }
+
+        // 复制共同 owner shell 的拓扑和几何。后续 pcurve、SameParameter 和
+        // tolerance 修改只作用于该 trial，失败时可直接丢弃。
+        BRepBuilderAPI_Copy copier(
+            ownerShellA,
+            Standard_True,
+            Standard_False);
+        const TopoDS_Shape copiedOwnerShape = copier.Shape();
+        if (copiedOwnerShape.IsNull() ||
+            copiedOwnerShape.ShapeType() != TopAbs_SHELL) {
+            errorMessage = "isolated trial copy did not produce an owner shell";
+            return false;
+        }
+
+        const auto mapSubShape = [&copier](
+            const TopoDS_Shape& source,
+            TopAbs_ShapeEnum expectedType,
+            TopoDS_Shape& mapped) {
+            mapped = copier.ModifiedShape(source);
+            if (mapped.IsNull() || mapped.ShapeType() != expectedType) {
+                return false;
+            }
+            mapped.Orientation(source.Orientation());
+            return true;
+        };
+
+        TopoDS_Shape mappedShape;
+        if (!mapSubShape(candidate.edgeA, TopAbs_EDGE, mappedShape)) {
+            errorMessage = "cannot map edgeA to the isolated trial";
+            return false;
+        }
+        trialCandidate.edgeA = TopoDS::Edge(mappedShape);
+        if (!mapSubShape(candidate.edgeB, TopAbs_EDGE, mappedShape)) {
+            errorMessage = "cannot map edgeB to the isolated trial";
+            return false;
+        }
+        trialCandidate.edgeB = TopoDS::Edge(mappedShape);
+        if (!mapSubShape(candidate.faceA, TopAbs_FACE, mappedShape)) {
+            errorMessage = "cannot map faceA to the isolated trial";
+            return false;
+        }
+        trialCandidate.faceA = TopoDS::Face(mappedShape);
+        if (!mapSubShape(candidate.faceB, TopAbs_FACE, mappedShape)) {
+            errorMessage = "cannot map faceB to the isolated trial";
+            return false;
+        }
+        trialCandidate.faceB = TopoDS::Face(mappedShape);
+
+        TopoDS_Shell sourceKey = ownerShellA;
+        sourceKey.Orientation(TopAbs_FORWARD);
+        TopoDS_Shell replacementValue = TopoDS::Shell(copiedOwnerShape);
+        replacementValue.Orientation(TopAbs_FORWARD);
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(sourceKey, replacementValue);
+        trialShape = reshaper.Apply(currentShape);
+        if (trialShape.IsNull() ||
+            trialShape.ShapeType() != currentShape.ShapeType()) {
+            errorMessage = "isolated owner-shell replacement changed the root shape type";
+            trialShape.Nullify();
+            return false;
+        }
+
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+        TopologyUtils::BuildEdgeFaceMap(trialShape, edgeFaceMap);
+        TopTools_ListOfShape edgeAFaces;
+        TopTools_ListOfShape edgeBFaces;
+        if (!findFacesForSameEdge(edgeFaceMap, trialCandidate.edgeA, edgeAFaces) ||
+            !findFacesForSameEdge(edgeFaceMap, trialCandidate.edgeB, edgeBFaces) ||
+            edgeAFaces.Extent() != 1 || edgeBFaces.Extent() != 1 ||
+            !edgeAFaces.First().IsSame(trialCandidate.faceA) ||
+            !edgeBFaces.First().IsSame(trialCandidate.faceB)) {
+            errorMessage = "candidate mapping is stale in the isolated trial";
+            trialShape.Nullify();
+            return false;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while creating isolated candidate trial: "
+            + failureText(failure);
+        trialShape.Nullify();
+        return false;
+    }
+    return true;
+}
+
+bool HealNarrowGap::buildCorrectedFaceBoundary(
+    const EdgeChoice& choice,
+    TopoDS_Wire& correctedWire,
+    std::vector<TopoDS_Edge>& boundaryEdges,
+    std::string& errorMessage) const
+{
+    correctedWire.Nullify();
+    boundaryEdges.clear();
+    if (choice.keptEdge.IsNull() || choice.edgeToReplace.IsNull() ||
+        choice.fixedFace.IsNull() || choice.faceToRebuild.IsNull()) {
+        errorMessage = "crossed-face edge choice is incomplete";
+        return false;
+    }
+    if (!haveSameVertexPair(choice.keptEdge, choice.edgeToReplace)) {
+        errorMessage = "crossed-face edges no longer share the same vertex pair";
+        return false;
+    }
+
+    try {
+        TopoDS_Face forwardFace = choice.faceToRebuild;
+        forwardFace.Orientation(TopAbs_FORWARD);
+
+        std::vector<TopoDS_Wire> faceWires;
+        for (TopExp_Explorer wireExplorer(forwardFace, TopAbs_WIRE);
+             wireExplorer.More();
+             wireExplorer.Next()) {
+            faceWires.push_back(TopoDS::Wire(wireExplorer.Current()));
+        }
+        if (faceWires.size() != 1) {
+            std::ostringstream message;
+            message << "defective face has unsupported wire count: wires="
+                    << faceWires.size();
+            errorMessage = message.str();
+            return false;
+        }
+
+        const TopoDS_Wire sourceWire = faceWires.front();
+        std::vector<TopoDS_Edge> directEdgeUses;
+        for (TopExp_Explorer edgeExplorer(sourceWire, TopAbs_EDGE);
+             edgeExplorer.More();
+             edgeExplorer.Next()) {
+            directEdgeUses.push_back(TopoDS::Edge(edgeExplorer.Current()));
+        }
+
+        std::vector<TopoDS_Edge> orderedEdgeUses;
+        for (BRepTools_WireExplorer edgeExplorer(sourceWire, forwardFace);
+             edgeExplorer.More();
+             edgeExplorer.Next()) {
+            orderedEdgeUses.push_back(edgeExplorer.Current());
+        }
+        if (orderedEdgeUses.size() != directEdgeUses.size()) {
+            std::ostringstream message;
+            message << "defective wire cannot be traversed completely: directEdgeUses="
+                    << directEdgeUses.size()
+                    << ", exploredEdgeUses=" << orderedEdgeUses.size();
+            errorMessage = message.str();
+            return false;
+        }
+
+        std::vector<bool> matchedOrderedUses(orderedEdgeUses.size(), false);
+        for (const TopoDS_Edge& directUse : directEdgeUses) {
+            bool matched = false;
+            for (std::size_t orderedIndex = 0;
+                 orderedIndex < orderedEdgeUses.size();
+                 ++orderedIndex) {
+                if (!matchedOrderedUses[orderedIndex] &&
+                    directUse.IsSame(orderedEdgeUses[orderedIndex])) {
+                    matchedOrderedUses[orderedIndex] = true;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                errorMessage = "defective wire traversal omitted a direct edge use";
+                return false;
+            }
+        }
+
+        TopoDS_Edge keptEdgeInFixedWire;
+        if (!findEdgeUseInFaceWire(
+                choice.fixedFace,
+                choice.keptEdge,
+                keptEdgeInFixedWire,
+                errorMessage)) {
+            errorMessage = "canonical kept edge has no unique use in fixed face: "
+                + errorMessage;
+            return false;
+        }
+
+        int replacementCount = 0;
+        TopoDS_Edge edgeToReplaceInWire;
+        for (const TopoDS_Edge& edgeUse : orderedEdgeUses) {
+            if (edgeUse.IsSame(choice.edgeToReplace)) {
+                edgeToReplaceInWire = edgeUse;
+                ++replacementCount;
+            }
+
+            if (isDegeneratedEdge(edgeUse) || BRep_Tool::IsClosed(edgeUse) ||
+                BRep_Tool::IsClosed(edgeUse, forwardFace)) {
+                errorMessage = "defective wire contains a seam, degenerated or self-closed edge";
+                return false;
+            }
+            if (!has3DCurve(edgeUse) ||
+                GeometryUtils::ComputeEdgeLength(edgeUse) <= Precision::Confusion()) {
+                errorMessage = "defective wire contains an edge without a stable 3d curve";
+                return false;
+            }
+        }
+        if (replacementCount != 1 || edgeToReplaceInWire.IsNull()) {
+            std::ostringstream message;
+            message << "defective edge does not have exactly one wire use: uses="
+                    << replacementCount;
+            errorMessage = message.str();
+            return false;
+        }
+        if (containsSameEdge(orderedEdgeUses, choice.keptEdge)) {
+            errorMessage = "canonical kept edge already exists in the defective wire";
+            return false;
+        }
+
+        TopoDS_Vertex oldStart;
+        TopoDS_Vertex oldEnd;
+        TopoDS_Vertex keptStart;
+        TopoDS_Vertex keptEnd;
+        if (!getEdgeVerticesOriented(edgeToReplaceInWire, oldStart, oldEnd) ||
+            !getEdgeVerticesOriented(keptEdgeInFixedWire, keptStart, keptEnd)) {
+            errorMessage = "cannot read oriented vertices for crossed-face replacement";
+            return false;
+        }
+
+        TopoDS_Edge replacementUse = keptEdgeInFixedWire;
+        if (keptStart.IsSame(oldStart) && keptEnd.IsSame(oldEnd)) {
+            // 当前 kept edge use 已与 defective wire 的旧 edge use 同向。
+        }
+        else if (keptStart.IsSame(oldEnd) && keptEnd.IsSame(oldStart)) {
+            replacementUse.Reverse();
+        }
+        else {
+            errorMessage = "canonical kept edge cannot preserve defective wire connectivity";
+            return false;
+        }
+
+        BRepBuilderAPI_MakeWire wireMaker;
+        for (const TopoDS_Edge& edgeUse : orderedEdgeUses) {
+            const TopoDS_Edge useToAdd = edgeUse.IsSame(choice.edgeToReplace)
+                ? replacementUse
+                : edgeUse;
+            if (containsSameEdge(boundaryEdges, useToAdd)) {
+                errorMessage = "corrected boundary would contain a repeated or seam edge use";
+                return false;
+            }
+            wireMaker.Add(useToAdd);
+            boundaryEdges.push_back(useToAdd);
+        }
+        if (!wireMaker.IsDone()) {
+            errorMessage = "failed to build the corrected crossed-face wire";
+            return false;
+        }
+
+        correctedWire = wireMaker.Wire();
+        correctedWire.Orientation(sourceWire.Orientation());
+        if (!BRep_Tool::IsClosed(correctedWire)) {
+            errorMessage = "corrected crossed-face wire is not closed";
+            correctedWire.Nullify();
+            return false;
+        }
+
+        BRepCheck_Analyzer wireAnalyzer(correctedWire, Standard_True);
+        if (!wireAnalyzer.IsValid()) {
+            errorMessage = "corrected crossed-face wire is invalid: "
+                + RepairDiagnostics::DescribeBRepCheckFailures(
+                    wireAnalyzer,
+                    correctedWire);
+            correctedWire.Nullify();
+            return false;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while constructing corrected face boundary: "
+            + failureText(failure);
+        correctedWire.Nullify();
+        boundaryEdges.clear();
+        return false;
+    }
+    return true;
+}
+
+bool HealNarrowGap::projectEdgeToFaceSurface(
+    TopoDS_Edge& edge,
+    const TopoDS_Face& face,
+    double& measuredDeviation,
+    double& appliedTolerance,
+    std::string& errorMessage) const
+{
+    measuredDeviation = 0.0;
+    appliedTolerance = 0.0;
+    if (edge.IsNull() || face.IsNull()) {
+        errorMessage = "edge or face is null during boundary projection";
+        return false;
+    }
+
+    try {
+        const double existingTolerance = std::max(
+            BRep_Tool::Tolerance(edge),
+            Precision::Confusion());
+        // 已有 tolerance 不能被降低，也不属于本次修复新增的误差预算。
+        // 当它已高于配置上限时，只允许维持原值，不能继续增大。
+        const double allowedTolerance = std::max(
+            existingTolerance,
+            myParams.maxRebuiltEdgeTolerance);
+
+        TopLoc_Location surfaceLocation;
+        const Handle(Geom_Surface) surface =
+            BRep_Tool::Surface(face, surfaceLocation);
+        if (surface.IsNull()) {
+            errorMessage = "defective face has no support surface";
+            return false;
+        }
+
+        Standard_Real firstParameter = 0.0;
+        Standard_Real lastParameter = 0.0;
+        Handle(Geom_Curve) projectionCurve =
+            BRep_Tool::Curve(edge, firstParameter, lastParameter);
+        if (projectionCurve.IsNull() ||
+            !std::isfinite(firstParameter) ||
+            !std::isfinite(lastParameter) ||
+            lastParameter - firstParameter <= Precision::PConfusion()) {
+            errorMessage = "boundary edge has no valid 3d curve range";
+            return false;
+        }
+
+        // BRep_Tool::Curve(edge, first, last) 已位于世界坐标；投影到带 location
+        // 的 surface 前，将曲线变换回 surface 的局部坐标系。
+        if (!surfaceLocation.IsIdentity()) {
+            const Handle(Geom_Geometry) transformed = projectionCurve->Transformed(
+                surfaceLocation.Transformation().Inverted());
+            projectionCurve = Handle(Geom_Curve)::DownCast(transformed);
+            if (projectionCurve.IsNull()) {
+                errorMessage = "failed to transform edge curve into surface coordinates";
+                return false;
+            }
+        }
+
+        const double projectionTolerance = std::min(
+            allowedTolerance,
+            std::max({
+                Precision::Confusion(),
+                myParams.pcurveTol,
+                existingTolerance }));
+        ShapeConstruct_ProjectCurveOnSurface projector;
+        projector.Init(surface, projectionTolerance);
+        Handle(Geom2d_Curve) projectedPCurve;
+        if (!projector.Perform(
+                projectionCurve,
+                firstParameter,
+                lastParameter,
+                projectedPCurve) &&
+            !projector.PerformByProjLib(
+                projectionCurve,
+                firstParameter,
+                lastParameter,
+                projectedPCurve)) {
+            errorMessage = "failed to project boundary edge onto support surface";
+            return false;
+        }
+        if (projectedPCurve.IsNull()) {
+            errorMessage = "boundary projection returned a null pcurve";
+            return false;
+        }
+
+        BRep_Builder builder;
+        builder.UpdateEdge(
+            edge,
+            projectedPCurve,
+            surface,
+            surfaceLocation,
+            projectionTolerance);
+        builder.Range(
+            edge,
+            surface,
+            surfaceLocation,
+            firstParameter,
+            lastParameter);
+
+        BRepLib_CheckCurveOnSurface checker(edge, face);
+        checker.Perform();
+        if (!checker.IsDone() || !std::isfinite(checker.MaxDistance())) {
+            errorMessage = "failed to measure boundary-to-surface deviation";
+            return false;
+        }
+        measuredDeviation = checker.MaxDistance();
+        if (measuredDeviation > myParams.maxBoundaryToSurfaceDeviation) {
+            std::ostringstream message;
+            message << "boundary-to-surface deviation exceeds budget: measured="
+                    << measuredDeviation
+                    << ", maximum=" << myParams.maxBoundaryToSurfaceDeviation;
+            errorMessage = message.str();
+            return false;
+        }
+
+        const double requiredTolerance = std::max(
+            existingTolerance,
+            measuredDeviation + Precision::Confusion());
+        if (requiredTolerance > allowedTolerance) {
+            std::ostringstream message;
+            message << "required edge tolerance exceeds maxRebuiltEdgeTolerance: required="
+                    << requiredTolerance
+                    << ", maximum=" << allowedTolerance
+                    << ", configuredMaximum="
+                    << myParams.maxRebuiltEdgeTolerance
+                    << ", existing=" << existingTolerance;
+            errorMessage = message.str();
+            return false;
+        }
+        builder.UpdateEdge(edge, requiredTolerance);
+
+        std::string pcurveError;
+        if (!GeometryUtils::RepairPCurveForEdgeOnFace(
+                edge,
+                face,
+                requiredTolerance,
+                &pcurveError)) {
+            errorMessage = "projected pcurve failed validation: " + pcurveError;
+            return false;
+        }
+
+        BRepLib_CheckCurveOnSurface finalChecker(edge, face);
+        finalChecker.Perform();
+        if (!finalChecker.IsDone() ||
+            !std::isfinite(finalChecker.MaxDistance()) ||
+            finalChecker.MaxDistance() > myParams.maxBoundaryToSurfaceDeviation) {
+            errorMessage = "repaired pcurve exceeds boundary-to-surface deviation budget";
+            return false;
+        }
+        measuredDeviation = finalChecker.MaxDistance();
+        appliedTolerance = std::max(
+            BRep_Tool::Tolerance(edge),
+            requiredTolerance);
+        if (appliedTolerance > allowedTolerance) {
+            errorMessage = "pcurve repair increased edge tolerance beyond its budget";
+            return false;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while projecting boundary edge: "
+            + failureText(failure);
+        return false;
+    }
+    return true;
+}
+
+bool HealNarrowGap::replaceCrossedFaceAndValidate(
+    const TopoDS_Shape& trialShape,
+    const EdgeChoice& choice,
+    const TopoDS_Face& rebuiltFace,
+    double pcurveValidationTol,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage) const
+{
+    repairedShape.Nullify();
+    if (trialShape.IsNull() || rebuiltFace.IsNull()) {
+        errorMessage = "crossed-face trial or rebuilt face is null";
+        return false;
+    }
+
+    BRepCheck_Analyzer faceAnalyzer(rebuiltFace, Standard_True);
+    if (!faceAnalyzer.IsValid()) {
+        errorMessage = "rebuilt crossed face is invalid: "
+            + RepairDiagnostics::DescribeBRepCheckFailures(
+                faceAnalyzer,
+                rebuiltFace);
+        return false;
+    }
+
+    try {
+        // source key 和 replacement value 都规范为 FORWARD，让 ReShape 在实际
+        // shell face use 上保留 defective face 的原 orientation。
+        TopoDS_Face sourceKey = choice.faceToRebuild;
+        sourceKey.Orientation(TopAbs_FORWARD);
+        TopoDS_Face replacementValue = rebuiltFace;
+        replacementValue.Orientation(TopAbs_FORWARD);
+        BRepTools_ReShape reshaper;
+        reshaper.Replace(sourceKey, replacementValue);
+        repairedShape = reshaper.Apply(trialShape);
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while replacing crossed face: "
+            + failureText(failure);
+        repairedShape.Nullify();
+        return false;
+    }
+
+    if (repairedShape.IsNull() ||
+        repairedShape.ShapeType() != trialShape.ShapeType()) {
+        errorMessage = "crossed-face replacement changed the root shape type";
+        repairedShape.Nullify();
+        return false;
+    }
+
+    const int freeEdgesBefore = TopologyUtils::CountFreeEdges(trialShape);
+    if (!validateEdgeReplacement(
+            trialShape,
+            repairedShape,
+            choice.keptEdge,
+            freeEdgesBefore,
+            pcurveValidationTol,
+            errorMessage)) {
+        repairedShape.Nullify();
+        return false;
+    }
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(repairedShape, edgeFaceMap);
+    TopTools_ListOfShape removedEdgeFaces;
+    if (findFacesForSameEdge(
+            edgeFaceMap,
+            choice.edgeToReplace,
+            removedEdgeFaces)) {
+        errorMessage = "defective edge is still used after crossed-face replacement";
+        repairedShape.Nullify();
+        return false;
+    }
+
+    TopTools_ListOfShape keptEdgeFaces;
+    if (!findFacesForSameEdge(edgeFaceMap, choice.keptEdge, keptEdgeFaces) ||
+        keptEdgeFaces.Extent() != 2) {
+        errorMessage = "canonical kept edge is not shared by exactly two faces";
+        repairedShape.Nullify();
+        return false;
+    }
+
+    TopAbs_Orientation orientations[2] = {
+        TopAbs_FORWARD,
+        TopAbs_FORWARD
+    };
+    int faceIndex = 0;
+    for (TopTools_ListIteratorOfListOfShape faceIterator(keptEdgeFaces);
+         faceIterator.More();
+         faceIterator.Next(), ++faceIndex) {
+        std::string orientationError;
+        if (!findUniqueEdgeUseOrientation(
+                TopoDS::Face(faceIterator.Value()),
+                choice.keptEdge,
+                orientations[faceIndex],
+                orientationError)) {
+            errorMessage = "cannot validate canonical edge orientation: "
+                + orientationError;
+            repairedShape.Nullify();
+            return false;
+        }
+    }
+    if (orientations[0] == orientations[1]) {
+        errorMessage = "canonical kept edge has the same orientation in both faces";
+        repairedShape.Nullify();
+        return false;
+    }
+    return true;
+}
+
+HealNarrowGap::OriginalSurfaceRepairStatus
+HealNarrowGap::tryRepairCrossedFaceOnOriginalSurface(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    double& maxBoundaryDeviation,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    maxBoundaryDeviation = 0.0;
+
+    TopoDS_Shape trialShape;
+    Candidate trialCandidate;
+    if (!createIsolatedCandidateTrial(
+            currentShape,
+            candidate,
+            trialShape,
+            trialCandidate,
+            errorMessage)) {
+        return OriginalSurfaceRepairStatus::RejectCandidate;
+    }
+
+    const EdgeChoice choice = chooseEdgeToKeep(trialCandidate);
+    TopoDS_Wire correctedWire;
+    std::vector<TopoDS_Edge> boundaryEdges;
+    if (!buildCorrectedFaceBoundary(
+            choice,
+            correctedWire,
+            boundaryEdges,
+            errorMessage)) {
+        return OriginalSurfaceRepairStatus::RejectCandidate;
+    }
+
+    double fixedPCurveTolerance = std::max(
+        BRep_Tool::Tolerance(choice.keptEdge),
+        myParams.pcurveTol);
+    std::string fixedPCurveError;
+    if (!GeometryUtils::HasValidPCurveOnFace(
+            choice.keptEdge,
+            choice.fixedFace,
+            fixedPCurveTolerance,
+            &fixedPCurveError)) {
+        TopoDS_Edge keptEdgeInFixedFace;
+        if (!findEdgeUseInFaceWire(
+                choice.fixedFace,
+                choice.keptEdge,
+                keptEdgeInFixedFace,
+                errorMessage)) {
+            errorMessage = "canonical kept edge cannot be located for pcurve repair: "
+                + errorMessage;
+            return OriginalSurfaceRepairStatus::RejectCandidate;
+        }
+
+        double fixedBoundaryDeviation = 0.0;
+        double fixedAppliedTolerance = 0.0;
+        if (!projectEdgeToFaceSurface(
+                keptEdgeInFixedFace,
+                choice.fixedFace,
+                fixedBoundaryDeviation,
+                fixedAppliedTolerance,
+                errorMessage)) {
+            errorMessage = "canonical kept edge is not a valid trusted boundary: "
+                + errorMessage;
+            return OriginalSurfaceRepairStatus::RejectCandidate;
+        }
+        fixedPCurveTolerance = std::max(
+            fixedPCurveTolerance,
+            fixedAppliedTolerance);
+    }
+
+    try {
+        TopoDS_Face forwardDefectiveFace = choice.faceToRebuild;
+        forwardDefectiveFace.Orientation(TopAbs_FORWARD);
+        TopLoc_Location surfaceLocation;
+        const Handle(Geom_Surface) surface =
+            BRep_Tool::Surface(forwardDefectiveFace, surfaceLocation);
+        if (surface.IsNull()) {
+            errorMessage = "defective face has no original support surface";
+            return OriginalSurfaceRepairStatus::RejectCandidate;
+        }
+
+        const double existingFaceTolerance = std::max(
+            Precision::Confusion(),
+            BRep_Tool::Tolerance(forwardDefectiveFace));
+        const double faceTolerance = std::min(
+            std::max(existingFaceTolerance, myParams.faceTol),
+            myParams.maxFaceTol);
+
+        BRep_Builder builder;
+        TopoDS_Face rebuiltFace;
+        builder.MakeFace(
+            rebuiltFace,
+            surface,
+            surfaceLocation,
+            faceTolerance);
+        builder.NaturalRestriction(
+            rebuiltFace,
+            BRep_Tool::NaturalRestriction(forwardDefectiveFace));
+        rebuiltFace.Orientation(TopAbs_FORWARD);
+        builder.Add(rebuiltFace, correctedWire);
+
+        TopoDS_Edge replacementUse;
+        for (TopoDS_Edge& boundaryEdge : boundaryEdges) {
+            if (boundaryEdge.IsSame(choice.keptEdge)) {
+                replacementUse = boundaryEdge;
+                break;
+            }
+        }
+        if (replacementUse.IsNull()) {
+            errorMessage = "corrected boundary does not contain the canonical kept edge";
+            return OriginalSurfaceRepairStatus::RejectCandidate;
+        }
+
+        double appliedTolerance = 0.0;
+        if (!projectEdgeToFaceSurface(
+                replacementUse,
+                rebuiltFace,
+                maxBoundaryDeviation,
+                appliedTolerance,
+                errorMessage)) {
+            return OriginalSurfaceRepairStatus::NeedsSurfaceRebuild;
+        }
+        builder.UpdateFace(
+            rebuiltFace,
+            std::max(faceTolerance, appliedTolerance));
+        rebuiltFace.Orientation(choice.faceToRebuild.Orientation());
+
+        BRepCheck_Analyzer faceAnalyzer(rebuiltFace, Standard_True);
+        if (!faceAnalyzer.IsValid()) {
+            errorMessage = "corrected wire is valid but cannot form a valid face on the original surface: "
+                + RepairDiagnostics::DescribeBRepCheckFailures(
+                    faceAnalyzer,
+                    rebuiltFace);
+            return OriginalSurfaceRepairStatus::NeedsSurfaceRebuild;
+        }
+
+        if (!replaceCrossedFaceAndValidate(
+                trialShape,
+                choice,
+                rebuiltFace,
+                std::max(appliedTolerance, fixedPCurveTolerance),
+                repairedShape,
+                errorMessage)) {
+            return OriginalSurfaceRepairStatus::RejectCandidate;
+        }
+    }
+    catch (const Standard_Failure& failure) {
+        errorMessage = "OCCT failure while rebuilding crossed face on original surface: "
+            + failureText(failure);
+        return OriginalSurfaceRepairStatus::NeedsSurfaceRebuild;
+    }
+
+    return OriginalSurfaceRepairStatus::Success;
+}
+
+bool HealNarrowGap::tryRepairCrossedFaceWithRebuiltSurface(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& rebuildMethod,
+    double& maxBoundaryDeviation,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+    rebuildMethod.clear();
+    maxBoundaryDeviation = 0.0;
+
+    const auto attemptMethod = [&](
+        bool usePlanarSurface,
+        TopoDS_Shape& methodResult,
+        double& methodDeviation,
+        std::string& methodError) {
+        TopoDS_Shape trialShape;
+        Candidate trialCandidate;
+        if (!createIsolatedCandidateTrial(
+                currentShape,
+                candidate,
+                trialShape,
+                trialCandidate,
+                methodError)) {
+            return false;
+        }
+
+        const EdgeChoice choice = chooseEdgeToKeep(trialCandidate);
+        TopoDS_Wire correctedWire;
+        std::vector<TopoDS_Edge> boundaryEdges;
+        if (!buildCorrectedFaceBoundary(
+                choice,
+                correctedWire,
+                boundaryEdges,
+                methodError)) {
+            return false;
+        }
+
+        double fixedPCurveTolerance = std::max(
+            BRep_Tool::Tolerance(choice.keptEdge),
+            myParams.pcurveTol);
+        std::string fixedPCurveError;
+        if (!GeometryUtils::HasValidPCurveOnFace(
+                choice.keptEdge,
+                choice.fixedFace,
+                fixedPCurveTolerance,
+                &fixedPCurveError)) {
+            TopoDS_Edge keptEdgeInFixedFace;
+            if (!findEdgeUseInFaceWire(
+                    choice.fixedFace,
+                    choice.keptEdge,
+                    keptEdgeInFixedFace,
+                    methodError)) {
+                methodError = "canonical kept edge cannot be located for pcurve repair: "
+                    + methodError;
+                return false;
+            }
+            double fixedBoundaryDeviation = 0.0;
+            double fixedAppliedTolerance = 0.0;
+            if (!projectEdgeToFaceSurface(
+                    keptEdgeInFixedFace,
+                    choice.fixedFace,
+                    fixedBoundaryDeviation,
+                    fixedAppliedTolerance,
+                    methodError)) {
+                methodError = "canonical kept edge is not a valid trusted boundary: "
+                    + methodError;
+                return false;
+            }
+            fixedPCurveTolerance = std::max(
+                fixedPCurveTolerance,
+                fixedAppliedTolerance);
+        }
+
+        try {
+            const double faceTolerance = std::min(
+                std::max(
+                    BRep_Tool::Tolerance(choice.faceToRebuild),
+                    myParams.faceTol),
+                myParams.maxFaceTol);
+            TopoDS_Face patchFace;
+            BRep_Builder builder;
+
+            if (usePlanarSurface) {
+                BRepBuilderAPI_FindPlane planeFinder(
+                    correctedWire,
+                    myParams.maxBoundaryToSurfaceDeviation);
+                if (!planeFinder.Found() || planeFinder.Plane().IsNull()) {
+                    methodError = "corrected boundary is not planar within the deviation budget";
+                    return false;
+                }
+                BRepBuilderAPI_MakeFace faceMaker(
+                    planeFinder.Plane()->Pln(),
+                    correctedWire,
+                    Standard_True);
+                if (!faceMaker.IsDone() || faceMaker.Face().IsNull()) {
+                    methodError = "failed to build a planar crossed-face patch";
+                    return false;
+                }
+                patchFace = faceMaker.Face();
+            }
+            else {
+                constexpr int fillingDegree = 3;
+                constexpr int fillingPointsOnCurve = 15;
+                constexpr int fillingIterations = 2;
+                constexpr int fillingMaxDegree = 6;
+                constexpr int fillingMaxSegments = 16;
+                constexpr int maxPolesPerDirection = 80;
+                constexpr int maxControlPoints = 4096;
+
+                BRepFill_Filling filling;
+                filling.SetResolParam(
+                    fillingDegree,
+                    fillingPointsOnCurve,
+                    fillingIterations,
+                    Standard_False);
+                filling.SetConstrParam(
+                    myParams.pcurveTol,
+                    myParams.maxBoundaryToSurfaceDeviation,
+                    1.0e-2,
+                    1.0e-1);
+                filling.SetApproxParam(
+                    fillingMaxDegree,
+                    fillingMaxSegments);
+                for (const TopoDS_Edge& boundaryEdge : boundaryEdges) {
+                    filling.Add(boundaryEdge, GeomAbs_C0, Standard_True);
+                }
+                filling.Build();
+                if (!filling.IsDone() || filling.Face().IsNull()) {
+                    methodError = "BRepFill_Filling did not build a crossed-face patch";
+                    return false;
+                }
+                const double g0Error = filling.G0Error();
+                if (!std::isfinite(g0Error) ||
+                    g0Error > myParams.maxBoundaryToSurfaceDeviation) {
+                    std::ostringstream message;
+                    message << "Filling G0 error exceeds the boundary budget: error="
+                            << g0Error
+                            << ", maximum="
+                            << myParams.maxBoundaryToSurfaceDeviation;
+                    methodError = message.str();
+                    return false;
+                }
+
+                const Handle(Geom_Surface) fillingSurface =
+                    BRep_Tool::Surface(filling.Face());
+                const Handle(Geom_BSplineSurface) bsplineSurface =
+                    Handle(Geom_BSplineSurface)::DownCast(fillingSurface);
+                if (bsplineSurface.IsNull()) {
+                    methodError = "Filling did not produce a B-spline support surface";
+                    return false;
+                }
+                if (bsplineSurface->UDegree() > fillingMaxDegree ||
+                    bsplineSurface->VDegree() > fillingMaxDegree ||
+                    bsplineSurface->NbUPoles() > maxPolesPerDirection ||
+                    bsplineSurface->NbVPoles() > maxPolesPerDirection ||
+                    bsplineSurface->NbUPoles() * bsplineSurface->NbVPoles()
+                        > maxControlPoints) {
+                    methodError = "Filling support surface exceeds the fixed complexity budget";
+                    return false;
+                }
+
+                builder.MakeFace(
+                    patchFace,
+                    fillingSurface,
+                    TopLoc_Location(),
+                    faceTolerance);
+                patchFace.Orientation(TopAbs_FORWARD);
+                builder.Add(patchFace, correctedWire);
+            }
+
+            methodDeviation = 0.0;
+            double maximumAppliedTolerance = fixedPCurveTolerance;
+            for (TopoDS_Edge& boundaryEdge : boundaryEdges) {
+                double edgeDeviation = 0.0;
+                double edgeTolerance = 0.0;
+                if (!projectEdgeToFaceSurface(
+                        boundaryEdge,
+                        patchFace,
+                        edgeDeviation,
+                        edgeTolerance,
+                        methodError)) {
+                    return false;
+                }
+                methodDeviation = std::max(methodDeviation, edgeDeviation);
+                maximumAppliedTolerance = std::max(
+                    maximumAppliedTolerance,
+                    edgeTolerance);
+            }
+            builder.UpdateFace(
+                patchFace,
+                std::max(faceTolerance, maximumAppliedTolerance));
+            patchFace.Orientation(choice.faceToRebuild.Orientation());
+
+            BRepCheck_Analyzer faceAnalyzer(patchFace, Standard_True);
+            if (!faceAnalyzer.IsValid()) {
+                methodError = "rebuilt support surface produced an invalid face: "
+                    + RepairDiagnostics::DescribeBRepCheckFailures(
+                        faceAnalyzer,
+                        patchFace);
+                return false;
+            }
+
+            if (!replaceCrossedFaceAndValidate(
+                    trialShape,
+                    choice,
+                    patchFace,
+                    maximumAppliedTolerance,
+                    methodResult,
+                    methodError)) {
+                return false;
+            }
+        }
+        catch (const Standard_Failure& failure) {
+            methodError = "OCCT failure while rebuilding crossed-face support surface: "
+                + failureText(failure);
+            return false;
+        }
+        return true;
+    };
+
+    std::string planarError;
+    if (attemptMethod(
+            true,
+            repairedShape,
+            maxBoundaryDeviation,
+            planarError)) {
+        rebuildMethod = "Planar";
+        return true;
+    }
+
+    std::string fillingError;
+    if (attemptMethod(
+            false,
+            repairedShape,
+            maxBoundaryDeviation,
+            fillingError)) {
+        rebuildMethod = "Filling";
+        return true;
+    }
+
+    errorMessage = "Level 2 surface rebuild failed:"
+        "\n  [Planar]\n"
+        + RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::MakeFailureReasonReadable(planarError),
+            "    ")
+        + "\n  [Filling]\n"
+        + RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::MakeFailureReasonReadable(fillingError),
+            "    ");
+    return false;
+}
+
+bool HealNarrowGap::tryRepairByRebuildingCrossedFaceBoundary(
+    const TopoDS_Shape& currentShape,
+    const Candidate& candidate,
+    TopoDS_Shape& repairedShape,
+    std::string& errorMessage)
+{
+    repairedShape.Nullify();
+
+    double level1Deviation = 0.0;
+    std::string level1Error;
+    const OriginalSurfaceRepairStatus level1Status =
+        tryRepairCrossedFaceOnOriginalSurface(
+            currentShape,
+            candidate,
+            repairedShape,
+            level1Deviation,
+            level1Error);
+
+    if (level1Status == OriginalSurfaceRepairStatus::Success) {
+        std::ostringstream message;
+        message << "Crossed-face boundary Level 1: status=Success"
+                << ", maxBoundaryDeviation=" << level1Deviation;
+        appendMessage(messages_, message.str());
+        appendMessage(
+            messages_,
+            "Candidate repair accepted by crossed-face boundary rebuild: level=1, method=OriginalSurface");
+        return true;
+    }
+
+    if (level1Status == OriginalSurfaceRepairStatus::RejectCandidate) {
+        appendMessage(
+            messages_,
+            "Crossed-face boundary Level 1: status=RejectCandidate");
+        errorMessage = "Level 1 rejected candidate: " + level1Error;
+        return false;
+    }
+
+    appendMessage(
+        messages_,
+        "Crossed-face boundary Level 1: status=NeedsSurfaceRebuild");
+    appendMessage(
+        messages_,
+        "Crossed-face boundary Level 2: entered=true");
+
+    std::string rebuildMethod;
+    double level2Deviation = 0.0;
+    std::string level2Error;
+    if (!tryRepairCrossedFaceWithRebuiltSurface(
+            currentShape,
+            candidate,
+            repairedShape,
+            rebuildMethod,
+            level2Deviation,
+            level2Error)) {
+        errorMessage = "Level 1 requires surface rebuild: " + level1Error
+            + "\n" + level2Error;
+        return false;
+    }
+
+    std::ostringstream success;
+    success << "Crossed-face boundary Level 2: status=Success"
+            << ", method=" << rebuildMethod
+            << ", maxBoundaryDeviation=" << level2Deviation;
+    appendMessage(messages_, success.str());
+    appendMessage(
+        messages_,
+        "Candidate repair accepted by crossed-face boundary rebuild: level=2, method="
+            + rebuildMethod);
     return true;
 }
 
@@ -2254,8 +3440,12 @@ bool HealNarrowGap::validateWholeShape(
         return false;
     }
 
+    // face/shell 重建后父级 TShape 会变化，不能按对象身份把原有错误误判为新增。
+    // 按子形状类型和 status 的数量比较，只拒绝实际增加的错误。
     const RepairDiagnostics::FailureList newFailures =
-        RepairDiagnostics::FindNewBRepCheckFailures(existingFailures, repairedFailures);
+        RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+            existingFailures,
+            repairedFailures);
 
     if (!newFailures.empty()) {
         errorMessage = "New BRepCheck failures after replacement:";
