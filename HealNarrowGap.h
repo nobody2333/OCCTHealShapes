@@ -13,7 +13,7 @@
 // 专门处理“同端点双边细缝”的局部细缝修复。
 class HealNarrowGap {
 public:
-    // 修复策略：Auto 依次尝试单边替换、曲面交线、中线塌缩和 crossed-face 两级修复。
+    // 修复策略：Auto 先运行常规策略；全部常规候选均失败后，再单独扫描 crossed-face 候选。
     enum class RepairStrategy {
         ReplaceOneSide,
         SurfaceIntersection,
@@ -23,9 +23,9 @@ public:
 
     // 修复参数：只约束本类负责的窄缝场景，不做全局 sewing 或补面。
     struct Params {
-        // Auto 保留原有三种策略顺序，并将 crossed-face 两级修复作为最后兜底。
+        // Auto 保留原有三种策略顺序，并从普通跳过列表执行 crossed-face 后置筛选。
         RepairStrategy repairStrategy = RepairStrategy::Auto;
-        // 是否在 Auto 的前三种策略失败后尝试 crossed-face 两级修复。
+        // 是否在 Auto 的常规策略全部停止后扫描 crossed-face 候选。
         bool enableCrossedFaceBoundaryRepair = true;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
         double candidateMaxGap = 1.0e-1;
@@ -33,10 +33,13 @@ public:
         double repairMaxGap = 8.0e-2;
         // SurfaceIntersection 允许处理的最大边间距离。
         double surfaceIntersectionMaxGap = 1.0e-1;
-        // SurfaceIntersection 的求交容差；新增 crossed-face 两级修复不使用此参数。
+        // SurfaceIntersection 的求交容差；crossed-face 后置修复不使用此参数。
         double surfaceIntersectionFuzzyTol = 1.0e-1;
         // 中线塌缩允许处理的最大边间距离；不参与 pcurve/face/ShapeFix 容差计算。
         double midlineMaxGap = 1.0e-1;
+        // crossed-face 使用原支撑面重建时允许的最大候选边间距离。
+        // 实际门槛还会至少覆盖两个候选 face 的已有 tolerance。
+        double crossedFaceOriginalSurfaceMaxGap = 1.5e-1;
         // 保留的 pcurve 配置容差；当前新共享 edge 继承两条原 edge 的最大 tolerance。
         double pcurveTol = 1.0e-5;
         // 保留的 pcurve 容差上限；当前不截断从原候选 edge 继承的 tolerance。
@@ -45,10 +48,10 @@ public:
         double faceTol = 1.0e-5;
         // face 容差上限。
         double maxFaceTol = 1.0e-3;
-        // 一级修复允许 kept edge 偏离 defective face 原支撑面的最大实测距离。
-        double maxBoundaryToSurfaceDeviation = 1.0e-3;
-        // 两级修复允许边界 edge 达到的最大拓扑容差，不使用候选 gap 放大。
-        double maxRebuiltEdgeTolerance = 1.0e-3;
+        // crossed-face 原支撑面重建允许边界 edge 偏离支撑面的最大实测距离。
+        double maxBoundaryToSurfaceDeviation = 2.0e-1;
+        // crossed-face 原支撑面重建允许边界 edge 达到的最大拓扑容差。
+        double maxRebuiltEdgeTolerance = 2.0e-1;
         // ShapeFix_Shape 的工作精度。
         double shapeFixPrecision = 1.0e-6;
         // ShapeFix_Shape 允许的最大容差。
@@ -105,7 +108,7 @@ public:
     int perform(const TopoDS_Shape& inputShape);
 
 private:
-    // 一级修复的结构化结果，避免通过解析错误文字决定是否重建支撑面。
+    // 原支撑面修复的结构化结果；NeedsSurfaceRebuild 当前只记录并拒绝。
     enum class OriginalSurfaceRepairStatus {
         Success,
         NeedsSurfaceRebuild,
@@ -138,6 +141,12 @@ private:
         double lengthRatio = 0.0;
         // 综合置信度，越大越优先尝试。
         double confidence = 0.0;
+    };
+
+    // 普通候选阶段未能处理的边对及其失败原因，供 crossed-face 后置筛选复用。
+    struct SkippedCandidate {
+        Candidate candidate;
+        std::string reason;
     };
 
     // 单次修复时选择保留哪条边、替换哪条边。
@@ -174,6 +183,14 @@ private:
     std::vector<Candidate> extractCandidatePairs(
         const TopoDS_Shape& shape,
         const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
+        std::vector<SkippedCandidate>& skippedCandidates,
+        std::vector<std::string>& messages) const;
+
+    // 从普通阶段跳过的边对中筛选具有穿插证据的 crossed-face 候选。
+    std::vector<Candidate> selectCrossedFaceCandidates(
+        const TopoDS_Shape& currentShape,
+        const std::vector<SkippedCandidate>& skippedCandidates,
+        const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
         std::vector<std::string>& messages) const;
 
     // 判断两条边是否共享同一对端点，允许方向相反。
@@ -195,12 +212,39 @@ private:
     // 对候选边对做双向最近距离采样，计算 meanGap/maxGap/tangentScore。
     bool evaluateGeometricSimilarity(
         Candidate& candidate,
+        double maximumGap,
+        const char* maximumGapName,
+        bool requireTangentCompatibility,
         std::string& errorMessage) const;
 
     // 根据间隙、长度、切向和容差计算综合置信度。
     double computeCandidateConfidence(const Candidate& candidate) const;
     // 根据长度和容差策略决定保留哪条边。
     EdgeChoice chooseEdgeToKeep(const Candidate& candidate) const;
+    // 检查 face 的唯一外边界能否按真实连通顺序完整遍历。
+    bool hasTraversableCrossedFaceBoundary(
+        const TopoDS_Face& face,
+        const TopoDS_Edge& candidateEdge,
+        std::string& errorMessage,
+        bool* hasIncompleteTraversal = nullptr) const;
+    // 检查两条候选 edge 是否在公共端点之外发生几何相交。
+    bool haveCandidateEdgesIntersectionAwayFromEndpoints(
+        const Candidate& candidate,
+        std::string& evidenceMessage,
+        std::string& errorMessage) const;
+    // 只读采样 edge 到 face 未裁剪支撑面的最大投影偏差。
+    bool measureEdgeToFaceSupportDeviation(
+        const TopoDS_Edge& edge,
+        const TopoDS_Face& face,
+        int sampleCount,
+        double& maximumDeviation,
+        std::string& errorMessage) const;
+    // 优先选择边数较少的 face 重建；边数相同时复用普通保留边规则。
+    bool chooseCrossedFaceBoundaryEdgeChoice(
+        const Candidate& candidate,
+        EdgeChoice& choice,
+        std::string& selectionMessage,
+        std::string& errorMessage) const;
 
     // 尝试修复单个候选；失败时不修改 currentShape，由调用方尝试下一个候选。
     bool tryRepairCandidate(
@@ -216,14 +260,30 @@ private:
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
-    // 修复局部穿插 face：先保留原支撑面，必要时从完整修正边界重建支撑面。
+    // 修复局部穿插 face：当前只使用 defective face 的原支撑面。
     bool tryRepairByRebuildingCrossedFaceBoundary(
         const TopoDS_Shape& currentShape,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
-    // 一级修复：在独立 trial 中继续使用 defective face 的原支撑面。
+    // 对无法遍历的 defective wire，删除原 face 后在原支撑面上重建干净边界。
+    bool tryRepairByDeletingAndRebuildingCrossedFaceOnOriginalSurface(
+        const TopoDS_Shape& currentShape,
+        const Candidate& candidate,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage,
+        bool allowBoundaryVertexMerge = true);
+
+    // 同一 defective face 的多条 canonical boundary edge 必须在同一 trial 中提交。
+    bool tryRepairByDeletingAndRebuildingCrossedFaceOnOriginalSurface(
+        const TopoDS_Shape& currentShape,
+        const std::vector<Candidate>& candidates,
+        TopoDS_Shape& repairedShape,
+        std::string& errorMessage,
+        bool allowBoundaryVertexMerge);
+
+    // 在独立 trial 中继续使用 defective face 的原支撑面。
     OriginalSurfaceRepairStatus tryRepairCrossedFaceOnOriginalSurface(
         const TopoDS_Shape& currentShape,
         const Candidate& candidate,
@@ -231,7 +291,7 @@ private:
         double& maxBoundaryDeviation,
         std::string& errorMessage);
 
-    // 二级修复：分别在独立 trial 中尝试平面和固定参数 Filling 补面。
+    // 预留的拟合曲面实现；当前 crossed-face 后置筛选不会调用。
     bool tryRepairCrossedFaceWithRebuiltSurface(
         const TopoDS_Shape& currentShape,
         const Candidate& candidate,
@@ -248,6 +308,14 @@ private:
         Candidate& trialCandidate,
         std::string& errorMessage) const;
 
+    // 复制共同 owner shell，并在同一副本中映射一组 crossed-face 候选。
+    bool createIsolatedCandidateGroupTrial(
+        const TopoDS_Shape& currentShape,
+        const std::vector<Candidate>& candidates,
+        TopoDS_Shape& trialShape,
+        std::vector<Candidate>& trialCandidates,
+        std::string& errorMessage) const;
+
     // 用 canonical kept edge 替换 defective edge，构造单一、无分支的闭合边界。
     bool buildCorrectedFaceBoundary(
         const EdgeChoice& choice,
@@ -259,6 +327,8 @@ private:
     bool projectEdgeToFaceSurface(
         TopoDS_Edge& edge,
         const TopoDS_Face& face,
+        double maximumDeviation,
+        double maximumEdgeTolerance,
         double& measuredDeviation,
         double& appliedTolerance,
         std::string& errorMessage) const;

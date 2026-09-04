@@ -468,6 +468,9 @@ int runShapeRepairPipeline(const std::string& fileName) {
     // 调整这些开关即可指定参与本次修复的模块。
     const bool enableHealNarrowGap = true;
     const bool enableHealClosedNarrowGap = true;
+    // 闭合细缝修复可能整理出 crossed-face 重建所需的干净边界，完成后再复扫一次。
+    const bool enableHealNarrowGapPostClosedPass =
+        enableHealNarrowGap && enableHealClosedNarrowGap;
     // 自动补孔需要结合模型单位设置尺寸范围；当前已启用。
     const bool enableHealSimpleHole = true;
 
@@ -481,8 +484,8 @@ int runShapeRepairPipeline(const std::string& fileName) {
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
 
-    // 性能对照：关闭 HealNarrowGap 的 crossed-face 两级兜底策略。
-    narrowGapParams.enableCrossedFaceBoundaryRepair = false;
+    // 当前启用 HealNarrowGap 的 crossed-face 后置原支撑面重建策略。
+    narrowGapParams.enableCrossedFaceBoundaryRepair = true;
 
     // 与独立入口共用 HealSimpleHole::Params 中的默认配置。
 
@@ -498,6 +501,12 @@ int runShapeRepairPipeline(const std::string& fileName) {
     pipeline.addStage(ShapeRepairStages::MakeHealClosedNarrowGapStage(
         closedNarrowGapParams,
         enableHealClosedNarrowGap));
+    ShapeRepairPipeline::Stage narrowGapPostClosedStage =
+        ShapeRepairStages::MakeHealNarrowGapStage(
+            narrowGapParams,
+            enableHealNarrowGapPostClosedPass);
+    narrowGapPostClosedStage.name = "HealNarrowGapPostClosedPass";
+    pipeline.addStage(narrowGapPostClosedStage);
 
     std::cout << "Running configured shape repair pipeline......" << std::endl;
     const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
