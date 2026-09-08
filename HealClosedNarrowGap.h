@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "RepairDiagnostics.h"
+
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -271,18 +273,21 @@ private:
     std::vector<ClosedGapCandidate> extractCandidates(const TopoDS_Shape& shape) const;
     bool tryRepairCandidate(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const ClosedGapCandidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
     bool tryRepairByMidlineCollapse(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const ClosedGapCandidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
 
     bool tryRepairByDeletingAndFillingDefectiveFace(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const ClosedGapCandidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -314,6 +319,7 @@ private:
 
     bool tryRepairBySideReplacement(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const ClosedGapCandidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -485,6 +491,15 @@ private:
 
     bool validateRepairResult(
         const TopoDS_Shape& beforeShape,
+        const TopoDS_Shape& afterShape,
+        const EdgeChain& keptChain,
+        const std::vector<TopoDS_Edge>& removedEdges,
+        int freeEdgesBefore,
+        std::string& errorMessage) const;
+
+    // 本轮候选复用 currentShape 的错误基线；中间 trial 比较仍使用原重载。
+    bool validateRepairResult(
+        const RepairDiagnostics::FailureList& existingFailures,
         const TopoDS_Shape& afterShape,
         const EdgeChain& keptChain,
         const std::vector<TopoDS_Edge>& removedEdges,

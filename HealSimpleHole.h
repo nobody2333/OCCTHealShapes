@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "RepairDiagnostics.h"
+
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -247,6 +249,7 @@ private:
     // 兜底：只 sewing owner shell 和临时 C0 filling face，并跟踪 sewing 后的共享边。
     bool tryRepairByLocalSewing(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -254,6 +257,7 @@ private:
     // 用已经构造完成的 patch face执行 shell 重建及统一验证。
     bool tryCommitPatchFace(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         const TopoDS_Face& patchFace,
         const std::vector<TopoDS_Edge>& resultBoundaryEdges,
@@ -263,6 +267,7 @@ private:
 
     bool tryRepairCandidate(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -283,6 +288,30 @@ private:
         const TopoDS_Face& patchFace,
         const std::vector<TopoDS_Edge>& resultBoundaryEdges,
         int freeEdgesBefore,
+        std::string& errorMessage) const;
+
+    // 最终提交相对于本轮 currentShape 比较；中间 trial 可继续使用原重载。
+    bool validateRepairResult(
+        const RepairDiagnostics::FailureList& existingFailures,
+        const TopoDS_Shape& afterShape,
+        const Candidate& candidate,
+        const TopoDS_Face& patchFace,
+        const std::vector<TopoDS_Edge>& resultBoundaryEdges,
+        int freeEdgesBefore,
+        std::string& errorMessage) const;
+
+    // 两种验证入口共用原有的边界、共享关系、pcurve 和 free edge 检查。
+    bool validateRepairBoundary(
+        const TopoDS_Shape& afterShape,
+        const Candidate& candidate,
+        const TopoDS_Face& patchFace,
+        const std::vector<TopoDS_Edge>& resultBoundaryEdges,
+        int freeEdgesBefore,
+        std::string& errorMessage) const;
+
+    bool validateBRepCheckResult(
+        const RepairDiagnostics::FailureList& existingFailures,
+        const TopoDS_Shape& afterShape,
         std::string& errorMessage) const;
 
     void appendMessage(const std::string& message);

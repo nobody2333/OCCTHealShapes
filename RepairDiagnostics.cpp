@@ -114,7 +114,9 @@ RepairDiagnostics::FailureList RepairDiagnostics::CollectBRepCheckFailures(
     }
 
     try {
-        BRepCheck_Analyzer analyzer(shape, Standard_True);
+        // 使用 OCCT 自带的并行检查；几何检查和精度模式保持原值，
+        // 错误仍在检查完成后按原有拓扑遍历顺序串行收集。
+        BRepCheck_Analyzer analyzer(shape, Standard_True, Standard_True);
         TopTools_IndexedMapOfShape allShapes;
         TopExp::MapShapes(shape, allShapes);
 

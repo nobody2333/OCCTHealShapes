@@ -3,6 +3,8 @@
 #include <vector>
 #include <format>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <filesystem>
 #include <TopExp_Explorer.hxx>
@@ -530,6 +532,11 @@ int runShapeRepairPipeline(const std::string& fileName) {
 
 int main()
 {
+    const std::time_t currentTime = std::time(nullptr);
+    std::tm localTime{};
+    if (localtime_s(&localTime, &currentTime) == 0) {
+        std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
+    }
     std::string fileName = "h6k";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
@@ -538,5 +545,9 @@ int main()
 	//healSimpleHole(fileName);
 	//sewShellsOnStepShape(filename);
 	runShapeRepairPipeline(fileName);
+    const std::time_t endTime = std::time(nullptr);
+    if (localtime_s(&localTime, &endTime) == 0) {
+        std::cout << "end time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
+    }
     return 0;
 }

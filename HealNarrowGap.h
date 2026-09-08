@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "RepairDiagnostics.h"
+
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -28,9 +30,9 @@ public:
         // 是否在 Auto 的常规策略全部停止后扫描 crossed-face 候选。
         bool enableCrossedFaceBoundaryRepair = true;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
-        double candidateMaxGap = 1.0e-1;
+        double candidateMaxGap = 1.1e-1;
         // 真正允许执行拓扑替换的最大边间距离，用于二次严格过滤。
-        double repairMaxGap = 8.0e-2;
+        double repairMaxGap = 1.1e-1;
         // SurfaceIntersection 允许处理的最大边间距离。
         double surfaceIntersectionMaxGap = 1.0e-1;
         // SurfaceIntersection 的求交容差；crossed-face 后置修复不使用此参数。
@@ -249,6 +251,7 @@ private:
     // 尝试修复单个候选；失败时不修改 currentShape，由调用方尝试下一个候选。
     bool tryRepairCandidate(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -256,6 +259,7 @@ private:
     // 原有策略：保留一侧 edge，并用它替换另一侧 edge。
     bool tryRepairByReplacingOneSide(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -345,6 +349,7 @@ private:
     // 求交线策略：用两个 face 的真实 surface-section edge 替换两侧 gap edge。
     bool tryRepairBySurfaceIntersection(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -359,6 +364,7 @@ private:
     // 中线策略：由两侧 edge 采样生成中线 edge，并让两个 face 都引用这条新 edge。
     bool tryRepairByMidlineCollapse(
         const TopoDS_Shape& currentShape,
+        const RepairDiagnostics::FailureList& existingFailures,
         const Candidate& candidate,
         TopoDS_Shape& repairedShape,
         std::string& errorMessage);
@@ -399,12 +405,35 @@ private:
         int freeEdgesBefore,
         std::string& errorMessage) const;
 
+    // 复用本轮 currentShape 的错误基线，只检查修复结果。
+    bool validateWholeShape(
+        const RepairDiagnostics::FailureList& existingFailures,
+        const TopoDS_Shape& repairedShape,
+        int freeEdgesBefore,
+        std::string& errorMessage) const;
+
     // 校验 edge 级替换后 keptEdge 已经被多个 face 共享，并且 pcurve 可用。
     bool validateEdgeReplacement(
         const TopoDS_Shape& beforeShape,
         const TopoDS_Shape& repairedShape,
         const TopoDS_Edge& keptEdge,
         int freeEdgesBefore,
+        double pcurveValidationTol,
+        std::string& errorMessage) const;
+
+    // 普通候选的最终校验复用本轮基线；中间 trial 仍使用 beforeShape 重载。
+    bool validateEdgeReplacement(
+        const RepairDiagnostics::FailureList& existingFailures,
+        const TopoDS_Shape& repairedShape,
+        const TopoDS_Edge& keptEdge,
+        int freeEdgesBefore,
+        double pcurveValidationTol,
+        std::string& errorMessage) const;
+
+    // 两个整体校验入口共用原有的共享 edge 和 pcurve 检查。
+    bool validateSharedEdgeAfterReplacement(
+        const TopoDS_Shape& repairedShape,
+        const TopoDS_Edge& keptEdge,
         double pcurveValidationTol,
         std::string& errorMessage) const;
 

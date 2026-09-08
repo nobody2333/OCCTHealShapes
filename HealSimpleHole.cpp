@@ -1251,6 +1251,18 @@ int HealSimpleHole::perform()
             break;
         }
 
+        // 候选最终结果统一与本轮修复前的 currentShape 比较，而非已修改 pcurve 的 trial。
+        // 关闭错误增量拒绝时，保持原行为，不额外收集 BRepCheck 基线。
+        std::string baselineError;
+        const RepairDiagnostics::FailureList existingFailures = params_.rejectInvalidResult
+            ? RepairDiagnostics::CollectBRepCheckFailures(currentShape, &baselineError)
+            : RepairDiagnostics::FailureList();
+        if (!baselineError.empty()) {
+            appendMessage("Repair stopped: failed to collect existing BRepCheck failures: "
+                + baselineError);
+            break;
+        }
+
         {
             std::ostringstream message;
             message << "Candidate count=" << candidates.size();
@@ -1284,6 +1296,7 @@ int HealSimpleHole::perform()
             std::string errorMessage;
             if (!tryRepairCandidate(
                     currentShape,
+                    existingFailures,
                     candidate,
                     repairedShape,
                     errorMessage)) {
@@ -2252,6 +2265,7 @@ bool HealSimpleHole::addPatchFaceToOwnerShell(
 
 bool HealSimpleHole::tryCommitPatchFace(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     const TopoDS_Face& patchFace,
     const std::vector<TopoDS_Edge>& resultBoundaryEdges,
@@ -2270,7 +2284,7 @@ bool HealSimpleHole::tryCommitPatchFace(
     }
 
     if (!validateRepairResult(
-            currentShape,
+            existingFailures,
             repairedShape,
             candidate,
             patchFace,
@@ -2285,6 +2299,7 @@ bool HealSimpleHole::tryCommitPatchFace(
 
 bool HealSimpleHole::tryRepairByLocalSewing(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -2427,7 +2442,7 @@ bool HealSimpleHole::tryRepairByLocalSewing(
         }
 
         if (!validateRepairResult(
-                currentShape,
+                existingFailures,
                 repairedShape,
                 candidate,
                 mappedPatchFace,
@@ -2569,6 +2584,7 @@ bool HealSimpleHole::createTrialCandidate(
 
 bool HealSimpleHole::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -2595,6 +2611,7 @@ bool HealSimpleHole::tryRepairCandidate(
                 strategyError)
             && tryCommitPatchFace(
                 trialShape,
+                existingFailures,
                 trialCandidate,
                 patchFace,
                 trialCandidate.boundaryEdges,
@@ -2618,6 +2635,7 @@ bool HealSimpleHole::tryRepairCandidate(
 
     const auto tryBSplineStrategy = [this,
                                      &currentShape,
+                                     &existingFailures,
                                      &candidate,
                                      &repairedShape](
                                         bool useG1,
@@ -2700,6 +2718,7 @@ bool HealSimpleHole::tryRepairCandidate(
 
         if (!tryCommitPatchFace(
                 trialShape,
+                existingFailures,
                 trialCandidate,
                 patchFace,
                 trialCandidate.boundaryEdges,
@@ -2855,6 +2874,7 @@ bool HealSimpleHole::tryRepairCandidate(
                 strategyError)
             && tryRepairByLocalSewing(
                 trialShape,
+                existingFailures,
                 trialCandidate,
                 repairedShape,
                 strategyError)) {
@@ -2892,6 +2912,58 @@ bool HealSimpleHole::validateRepairResult(
     std::string& errorMessage) const
 {
     if (beforeShape.IsNull() || afterShape.IsNull() || patchFace.IsNull()) {
+        errorMessage = "before shape, after shape, or patch face is null";
+        return false;
+    }
+
+    if (!validateRepairBoundary(
+            afterShape, candidate, patchFace, resultBoundaryEdges, freeEdgesBefore, errorMessage)) {
+        return false;
+    }
+
+    if (params_.rejectInvalidResult) {
+        std::string existingError;
+        const RepairDiagnostics::FailureList existingFailures =
+            RepairDiagnostics::CollectBRepCheckFailures(beforeShape, &existingError);
+        if (!existingError.empty()) {
+            errorMessage = "failed to collect existing BRepCheck failures: "
+                + existingError;
+            return false;
+        }
+
+        return validateBRepCheckResult(existingFailures, afterShape, errorMessage);
+    }
+    return true;
+}
+
+// 复用本轮错误基线；各候选及各策略的结果仍分别执行完整检查。
+bool HealSimpleHole::validateRepairResult(
+    const RepairDiagnostics::FailureList& existingFailures,
+    const TopoDS_Shape& afterShape,
+    const Candidate& candidate,
+    const TopoDS_Face& patchFace,
+    const std::vector<TopoDS_Edge>& resultBoundaryEdges,
+    int freeEdgesBefore,
+    std::string& errorMessage) const
+{
+    if (!validateRepairBoundary(
+            afterShape, candidate, patchFace, resultBoundaryEdges, freeEdgesBefore, errorMessage)) {
+        return false;
+    }
+    return !params_.rejectInvalidResult
+        || validateBRepCheckResult(existingFailures, afterShape, errorMessage);
+}
+
+// 保留原有边界检查顺序，供独立 trial 和本轮缓存两个入口共用。
+bool HealSimpleHole::validateRepairBoundary(
+    const TopoDS_Shape& afterShape,
+    const Candidate& candidate,
+    const TopoDS_Face& patchFace,
+    const std::vector<TopoDS_Edge>& resultBoundaryEdges,
+    int freeEdgesBefore,
+    std::string& errorMessage) const
+{
+    if (afterShape.IsNull() || patchFace.IsNull()) {
         errorMessage = "before shape, after shape, or patch face is null";
         return false;
     }
@@ -2973,36 +3045,33 @@ bool HealSimpleHole::validateRepairResult(
         }
     }
 
-    if (params_.rejectInvalidResult) {
-        std::string existingError;
-        const RepairDiagnostics::FailureList existingFailures =
-            RepairDiagnostics::CollectBRepCheckFailures(beforeShape, &existingError);
-        if (!existingError.empty()) {
-            errorMessage = "failed to collect existing BRepCheck failures: "
-                + existingError;
-            return false;
-        }
+    return true;
+}
 
-        std::string resultError;
-        const RepairDiagnostics::FailureList resultFailures =
-            RepairDiagnostics::CollectBRepCheckFailures(afterShape, &resultError);
-        if (!resultError.empty()) {
-            errorMessage = "failed to collect result BRepCheck failures: "
-                + resultError;
-            return false;
-        }
-
-        const RepairDiagnostics::FailureList increasedFailures =
-            RepairDiagnostics::FindBRepCheckFailureCountIncrease(
-                existingFailures,
-                resultFailures);
-        if (!increasedFailures.empty()) {
-            errorMessage = "new BRepCheck failures after simple-hole patch: "
-                + RepairDiagnostics::DescribeBRepCheckFailures(increasedFailures);
-            return false;
-        }
+// 这里只收集 afterShape，错误增量仍按子形状类型与状态数量比较。
+bool HealSimpleHole::validateBRepCheckResult(
+    const RepairDiagnostics::FailureList& existingFailures,
+    const TopoDS_Shape& afterShape,
+    std::string& errorMessage) const
+{
+    std::string resultError;
+    const RepairDiagnostics::FailureList resultFailures =
+        RepairDiagnostics::CollectBRepCheckFailures(afterShape, &resultError);
+    if (!resultError.empty()) {
+        errorMessage = "failed to collect result BRepCheck failures: "
+            + resultError;
+        return false;
     }
 
+    const RepairDiagnostics::FailureList increasedFailures =
+        RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+            existingFailures,
+            resultFailures);
+    if (!increasedFailures.empty()) {
+        errorMessage = "new BRepCheck failures after simple-hole patch: "
+            + RepairDiagnostics::DescribeBRepCheckFailures(increasedFailures);
+        return false;
+    }
     return true;
 }
 

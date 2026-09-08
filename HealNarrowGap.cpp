@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -56,6 +57,7 @@
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 
@@ -370,6 +372,17 @@ int HealNarrowGap::perform()
     for (int iter = 0; iter < iterationLimit; ++iter) {
 
         RepairDiagnostics::AppendIterationHeader(messages_, iter + 1, iter > 0);
+        // 本轮候选共用 currentShape 的错误基线；提交后下一轮重新收集。
+        std::string baselineError;
+        const RepairDiagnostics::FailureList existingFailures =
+            RepairDiagnostics::CollectBRepCheckFailures(currentShape, &baselineError);
+        if (!baselineError.empty()) {
+            appendMessage(messages_,
+                "Repair stopped: Existing BRepCheck failure collection failed before replacement: "
+                + baselineError);
+            break;
+        }
+
         // edgeFaceMap 记录每条 edge 的相邻 face，用于判定单面边和 free edge。
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopologyUtils::BuildEdgeFaceMap(currentShape, edgeFaceMap);
@@ -495,6 +508,7 @@ int HealNarrowGap::perform()
             std::string errorMessage;
             if (!tryRepairCandidate(
                     currentShape,
+                    existingFailures,
                     candidate,
                     repairedShape,
                     errorMessage)) {
@@ -700,6 +714,29 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::extractCandidatePairs(
         return candidates;
     }
 
+    // 同端点判定只依赖 IsSame（包含 Location，不区分 orientation）。
+    // 本轮按无向拓扑端点对索引所有 edge，避免反复扫描不可能匹配的边对。
+    // 分组内保持原 edgeFaceMap 索引顺序，外层过滤和日志顺序不变。
+    using VertexPair = std::pair<int, int>;
+    TopTools_IndexedMapOfShape vertices;
+    std::vector<VertexPair> edgeVertexPairs(
+        static_cast<std::size_t>(edgeFaceMap.Extent()) + 1);
+    std::map<VertexPair, std::vector<int>> edgesByVertexPair;
+    for (int edgeIndex = 1; edgeIndex <= edgeFaceMap.Extent(); ++edgeIndex) {
+        const TopoDS_Edge edge = TopoDS::Edge(edgeFaceMap.FindKey(edgeIndex));
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        if (!getEdgeVerticesOriented(edge, start, end)) {
+            continue;
+        }
+        const int startIndex = vertices.Add(start);
+        const int endIndex = vertices.Add(end);
+        const VertexPair pair(
+            std::min(startIndex, endIndex), std::max(startIndex, endIndex));
+        edgeVertexPairs[static_cast<std::size_t>(edgeIndex)] = pair;
+        edgesByVertexPair[pair].push_back(edgeIndex);
+    }
+
     for (int i = 1; i <= edgeFaceMap.Extent(); ++i) {
         // edgeA 是外层候选边，必须是单面、非 seam、非退化、有 3D curve。
         const TopoDS_Edge edgeA = TopoDS::Edge(edgeFaceMap.FindKey(i));
@@ -729,7 +766,15 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::extractCandidatePairs(
             continue;
         }
 
-        for (int j = i + 1; j <= edgeFaceMap.Extent(); ++j) {
+        const auto matchingEdges = edgesByVertexPair.find(
+            edgeVertexPairs[static_cast<std::size_t>(i)]);
+        if (matchingEdges == edgesByVertexPair.end()) {
+            continue;
+        }
+        for (const int j : matchingEdges->second) {
+            if (j <= i) {
+                continue;
+            }
             // edgeB 是与 edgeA 配对检查的另一条边。
             const TopoDS_Edge edgeB = TopoDS::Edge(edgeFaceMap.FindKey(j));
             if (edgeB.IsNull() || edgeA.IsSame(edgeB)) {
@@ -1821,6 +1866,7 @@ bool HealNarrowGap::chooseCrossedFaceBoundaryEdgeChoice(
 // 根据策略尝试提交单个候选修复；不改变主循环“每轮只提交一个候选”的行为。
 bool HealNarrowGap::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -1837,7 +1883,7 @@ bool HealNarrowGap::tryRepairCandidate(
     const bool midlineGapAllowed = candidate.maxGap <= myParams.midlineMaxGap;
 
     if (myParams.repairStrategy == RepairStrategy::ReplaceOneSide) {
-        return tryRepairByReplacingOneSide(currentShape, candidate, repairedShape, errorMessage);
+        return tryRepairByReplacingOneSide(currentShape, existingFailures, candidate, repairedShape, errorMessage);
     }
 
     if (myParams.repairStrategy == RepairStrategy::SurfaceIntersection) {
@@ -1850,7 +1896,7 @@ bool HealNarrowGap::tryRepairCandidate(
             return false;
         }
 
-        return tryRepairBySurfaceIntersection(currentShape, candidate, repairedShape, errorMessage);
+        return tryRepairBySurfaceIntersection(currentShape, existingFailures, candidate, repairedShape, errorMessage);
     }
 
     if (myParams.repairStrategy == RepairStrategy::MidlineCollapse) {
@@ -1863,7 +1909,7 @@ bool HealNarrowGap::tryRepairCandidate(
             return false;
         }
 
-        return tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, errorMessage);
+        return tryRepairByMidlineCollapse(currentShape, existingFailures, candidate, repairedShape, errorMessage);
     }
 
     // Auto 在这里只运行原有常规策略。CrossedFaceBoundary 由 perform() 在
@@ -1872,6 +1918,7 @@ bool HealNarrowGap::tryRepairCandidate(
     if (sideGapAllowed) {
         if (tryRepairByReplacingOneSide(
                 currentShape,
+                existingFailures,
                 candidate,
                 repairedShape,
                 sideError)) {
@@ -1890,6 +1937,7 @@ bool HealNarrowGap::tryRepairCandidate(
     if (surfaceIntersectionGapAllowed) {
         if (tryRepairBySurfaceIntersection(
                 currentShape,
+                existingFailures,
                 candidate,
                 repairedShape,
                 surfaceIntersectionError)) {
@@ -1919,6 +1967,7 @@ bool HealNarrowGap::tryRepairCandidate(
     if (midlineGapAllowed) {
         if (tryRepairByMidlineCollapse(
                 currentShape,
+                existingFailures,
                 candidate,
                 repairedShape,
                 midlineError)) {
@@ -1971,6 +2020,7 @@ bool HealNarrowGap::tryRepairCandidate(
 // 尝试提交单个候选修复；任何校验失败都会返回 false，由调用方回滚并尝试下一候选。
 bool HealNarrowGap::tryRepairByReplacingOneSide(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -2158,7 +2208,7 @@ bool HealNarrowGap::tryRepairByReplacingOneSide(
     }
 
     if (!validateEdgeReplacement(
-            currentShape,
+            existingFailures,
             trialShape,
             choice.keptEdge,
             freeEdgesBefore,
@@ -4859,6 +4909,7 @@ bool HealNarrowGap::buildSurfaceIntersectionEdgeForCandidate(
 
 bool HealNarrowGap::tryRepairBySurfaceIntersection(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -5048,7 +5099,7 @@ bool HealNarrowGap::tryRepairBySurfaceIntersection(
     }
 
     if (!validateEdgeReplacement(
-            currentShape,
+            existingFailures,
             trialShape,
             intersectionEdge,
             freeEdgesBefore,
@@ -5206,6 +5257,7 @@ bool HealNarrowGap::buildMidlineEdgeForCandidate(
 
 bool HealNarrowGap::tryRepairByMidlineCollapse(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const Candidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -5390,7 +5442,7 @@ bool HealNarrowGap::tryRepairByMidlineCollapse(
     }
 
     if (!validateEdgeReplacement(
-            currentShape,
+            existingFailures,
             trialShape,
             midlineEdge,
             freeEdgesBefore,
@@ -5639,6 +5691,21 @@ bool HealNarrowGap::validateWholeShape(
         return false;
     }
 
+    return validateWholeShape(existingFailures, repairedShape, freeEdgesBefore, errorMessage);
+}
+
+// 复用调用方提供的错误基线，不缓存修复结果的 BRepCheck 检查。
+bool HealNarrowGap::validateWholeShape(
+    const RepairDiagnostics::FailureList& existingFailures,
+    const TopoDS_Shape& repairedShape,
+    int freeEdgesBefore,
+    std::string& errorMessage) const
+{
+    if (repairedShape.IsNull()) {
+        errorMessage = "Repaired shape is null";
+        return false;
+    }
+
     std::string repairedError;
     const RepairDiagnostics::FailureList repairedFailures =
         RepairDiagnostics::CollectBRepCheckFailures(repairedShape, &repairedError);
@@ -5687,6 +5754,34 @@ bool HealNarrowGap::validateEdgeReplacement(
         return false;
     }
 
+    return validateSharedEdgeAfterReplacement(
+        repairedShape, keptEdge, pcurveValidationTol, errorMessage);
+}
+
+// 普通候选使用本轮基线，整体检查标准与中间 trial 的入口保持一致。
+bool HealNarrowGap::validateEdgeReplacement(
+    const RepairDiagnostics::FailureList& existingFailures,
+    const TopoDS_Shape& repairedShape,
+    const TopoDS_Edge& keptEdge,
+    int freeEdgesBefore,
+    double pcurveValidationTol,
+    std::string& errorMessage) const
+{
+    if (!validateWholeShape(existingFailures, repairedShape, freeEdgesBefore, errorMessage)) {
+        return false;
+    }
+
+    return validateSharedEdgeAfterReplacement(
+        repairedShape, keptEdge, pcurveValidationTol, errorMessage);
+}
+
+// 整体检查通过后，沿用原有的 adjacency 和 pcurve 校验。
+bool HealNarrowGap::validateSharedEdgeAfterReplacement(
+    const TopoDS_Shape& repairedShape,
+    const TopoDS_Edge& keptEdge,
+    double pcurveValidationTol,
+    std::string& errorMessage) const
+{
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(repairedShape, edgeFaceMap);
     TopTools_ListOfShape adjacentFaces;

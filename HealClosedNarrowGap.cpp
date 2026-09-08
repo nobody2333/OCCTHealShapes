@@ -534,11 +534,21 @@ int HealClosedNarrowGap::perform()
             break;
         }
 
+        // 开始尝试本轮候选前只收集一次；失败候选不更新基线，提交后下一轮重建。
+        std::string baselineError;
+        const RepairDiagnostics::FailureList existingFailures =
+            RepairDiagnostics::CollectBRepCheckFailures(currentShape, &baselineError);
+        if (!baselineError.empty()) {
+            appendMessage("Repair stopped: existing BRepCheck failure collection failed: "
+                + baselineError);
+            break;
+        }
+
         bool repairedThisIteration = false;
         for (const ClosedGapCandidate& candidate : candidates) {
             TopoDS_Shape repairedShape;
             std::string errorMessage;
-            if (!tryRepairCandidate(currentShape, candidate, repairedShape, errorMessage)) {
+            if (!tryRepairCandidate(currentShape, existingFailures, candidate, repairedShape, errorMessage)) {
                 std::ostringstream os;
                 os << "Candidate failed:"
                    << "\n  chainAEdges=" << candidate.chainA.edges.size()
@@ -3458,6 +3468,7 @@ const char* HealClosedNarrowGap::gapEndTypeName(GapEndType type)
 
 bool HealClosedNarrowGap::tryRepairCandidate(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const ClosedGapCandidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -3470,7 +3481,7 @@ bool HealClosedNarrowGap::tryRepairCandidate(
 
     if (params_.useMidlineCollapse) {
         std::string midlineError;
-        if (tryRepairByMidlineCollapse(currentShape, candidate, repairedShape, midlineError)) {
+        if (tryRepairByMidlineCollapse(currentShape, existingFailures, candidate, repairedShape, midlineError)) {
             return true;
         }
 
@@ -3478,6 +3489,7 @@ bool HealClosedNarrowGap::tryRepairCandidate(
         if (params_.useDeleteAndFillDefectiveFace) {
             if (tryRepairByDeletingAndFillingDefectiveFace(
                     currentShape,
+                    existingFailures,
                     candidate,
                     repairedShape,
                     deleteAndFillError)) {
@@ -3515,6 +3527,7 @@ bool HealClosedNarrowGap::tryRepairCandidate(
             }
             else if (tryRepairBySideReplacement(
                          currentShape,
+                         existingFailures,
                          candidate,
                          repairedShape,
                          sideError)) {
@@ -3562,6 +3575,7 @@ bool HealClosedNarrowGap::tryRepairCandidate(
     }
     return tryRepairBySideReplacement(
         currentShape,
+        existingFailures,
         candidate,
         repairedShape,
         errorMessage);
@@ -3569,6 +3583,7 @@ bool HealClosedNarrowGap::tryRepairCandidate(
 
 bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const ClosedGapCandidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -3723,7 +3738,7 @@ bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
         removedEndpointEdges.push_back(candidate.finishEnd.connectorEdge);
     }
     if (!validateRepairResult(
-            currentShape,
+            existingFailures,
             trialShape,
             midlineData.chain,
             removedEndpointEdges,
@@ -4505,6 +4520,7 @@ bool HealClosedNarrowGap::validateDeleteAndFillBoundaryOrientations(
 
 bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const ClosedGapCandidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -4659,7 +4675,7 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
         const TopoDS_Shape& shape,
         std::string& validationError) {
         if (!validateRepairResult(
-                currentShape,
+                existingFailures,
                 shape,
                 plan.boundary,
                 plan.removedEdges,
@@ -4724,6 +4740,7 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
 
 bool HealClosedNarrowGap::tryRepairBySideReplacement(
     const TopoDS_Shape& currentShape,
+    const RepairDiagnostics::FailureList& existingFailures,
     const ClosedGapCandidate& candidate,
     TopoDS_Shape& repairedShape,
     std::string& errorMessage)
@@ -4780,7 +4797,7 @@ bool HealClosedNarrowGap::tryRepairBySideReplacement(
     }
 
     if (!validateRepairResult(
-            currentShape,
+            existingFailures,
             trialShape,
             choice.keptChain,
             std::vector<TopoDS_Edge>(),
@@ -5895,6 +5912,24 @@ bool HealClosedNarrowGap::validateRepairResult(
         RepairDiagnostics::CollectBRepCheckFailures(beforeShape, &existingError);
     if (!existingError.empty()) {
         errorMessage = "existing BRepCheck failure collection failed: " + existingError;
+        return false;
+    }
+
+    return validateRepairResult(
+        existingFailures, afterShape, keptChain, removedEdges, freeEdgesBefore, errorMessage);
+}
+
+// 仅检查本次结果；缓存限于同一轮 currentShape，不缓存任何修复结果。
+bool HealClosedNarrowGap::validateRepairResult(
+    const RepairDiagnostics::FailureList& existingFailures,
+    const TopoDS_Shape& afterShape,
+    const EdgeChain& keptChain,
+    const std::vector<TopoDS_Edge>& removedEdges,
+    int freeEdgesBefore,
+    std::string& errorMessage) const
+{
+    if (afterShape.IsNull()) {
+        errorMessage = "before or after shape is null";
         return false;
     }
 
