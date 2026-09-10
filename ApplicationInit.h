@@ -66,6 +66,11 @@ public:
         const ShapeRepairPipeline& pipeline);
 
     std::vector<TopoDS_Shape> getAllShapes() const;
+    // 各几何容器先修复，随后统一为 Compound，最多三轮 sewing + 复扫。
+    // 仅导出几何，不回写 XCAF 装配及属性。
+    int runGroupedRepairPipelineAndExport(
+        const std::string& filePath,
+        const ShapeRepairPipeline& pipeline);
     std::vector<TopoDS_Solid> getAllSolids() const;
     std::vector<TopoDS_Shell> getAllShells() const;
     std::vector<TopoDS_Edge> getAllEdges() const;

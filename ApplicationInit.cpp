@@ -1,6 +1,12 @@
 #include "ApplicationInit.h"
 
 #include <cctype>
+#include <algorithm>
+#include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
+#include "ShapeRepairStages.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -1399,6 +1405,145 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
     }
 
     return totalRepairCount;
+}
+
+int ApplicationInit::runGroupedRepairPipelineAndExport(
+    const std::string& filePath, const ShapeRepairPipeline& pipeline)
+{
+    if (aDoc_.IsNull() || pipeline.empty()) return -1;
+    const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(aDoc_->Main());
+    if (shapeTool.IsNull()) return -1;
+    const auto directory = std::filesystem::path(filePath).parent_path();
+    if (!directory.empty()) std::filesystem::create_directories(directory);
+    std::ofstream log(directory / "ShapeRepairPipelineLog.txt", std::ios::trunc);
+    if (!log) return -1;
+
+    // GetFreeShapes 只取实例根；GetShape 返回装配的实际位置化几何。
+    // 不再同时遍历零件定义，避免把定义和实例重复输出。
+    TDF_LabelSequence roots;
+    shapeTool->GetFreeShapes(roots);
+    std::vector<TopoDS_Shape> pieces;
+    std::function<void(const TopoDS_Shape&)> collect = [&](const TopoDS_Shape& shape) {
+        if (shape.IsNull()) return;
+        if (shape.ShapeType() == TopAbs_COMPOUND) {
+            // 默认迭代累计父位置与方向；统一容器自身保持单位变换。
+            for (TopoDS_Iterator it(shape); it.More(); it.Next()) collect(it.Value());
+        }
+        else if (shape.ShapeType() == TopAbs_SHELL
+            || shape.ShapeType() == TopAbs_SOLID
+            || shape.ShapeType() == TopAbs_COMPSOLID) {
+            // 仅收集完整壳/实体；不展开其内部面、边、顶点。
+            pieces.push_back(shape);
+        }
+        // 独立 FACE/WIRE/EDGE/VERTEX 不参与修复和最终导出。
+    };
+    for (int i = 1; i <= roots.Length(); ++i) collect(shapeTool->GetShape(roots.Value(i)));
+    std::stable_sort(pieces.begin(), pieces.end(), [](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+        return a.ShapeType() < b.ShapeType();
+    });
+    TopTools_MapOfShape covered;
+    std::vector<TopoDS_Shape> uniquePieces;
+    for (const auto& piece : pieces) {
+        if (covered.Contains(piece)) continue;
+        uniquePieces.push_back(piece);
+        TopExp::MapShapes(piece, covered); // 包含在 solid/shell 中的重复根也不再加入。
+    }
+    if (uniquePieces.empty()) return -1;
+    log << "Grouped geometry repair: freeRoots=" << roots.Length()
+        << ", uniquePieces=" << uniquePieces.size() << ", maxRounds=3" << std::endl;
+
+    auto report = [&](const ShapeRepairPipeline::Result& result) {
+        for (const auto& stage : result.stageReports) {
+            log << "[Stage " << stage.name << "] accepted=" << stage.accepted
+                << ", modified=" << stage.modified << ", repairCount=" << stage.repairCount
+                << ", rejection=" << stage.rejectionReason << '\n';
+            for (const auto& message : stage.messages) log << message << '\n';
+        }
+        for (const auto& message : result.messages) log << message << '\n';
+        log << "Pipeline modified=" << result.modified << ", rolledBack=" << result.rolledBack
+            << ", committed=" << result.totalRepairCount << std::endl;
+    };
+    BRep_Builder builder;
+    TopoDS_Compound original, combined;
+    builder.MakeCompound(original);
+    builder.MakeCompound(combined);
+    int total = 0;
+    for (std::size_t i = 0; i < uniquePieces.size(); ++i) {
+        const auto& piece = uniquePieces[i];
+        builder.Add(original, piece);
+        TopoDS_Shape accepted = piece;
+        if (piece.ShapeType() <= TopAbs_SHELL) {
+            log << "[Initial piece " << i << "] type="
+                << TopologyUtils::ShapeTypeName(piece) << std::endl;
+            std::cout << "Initial repair piece " << i + 1 << "/" << uniquePieces.size()
+                << ": " << TopologyUtils::ShapeTypeName(piece) << std::endl;
+            BRepBuilderAPI_Copy copy(piece, Standard_True, Standard_False);
+            if (copy.Shape().IsNull()) return -1;
+            const auto result = pipeline.perform(copy.Shape());
+            report(result);
+            if (result.modified && !result.rolledBack && !result.resultShape.IsNull()) {
+                accepted = result.resultShape;
+                total += result.totalRepairCount;
+            }
+        }
+        builder.Add(combined, accepted);
+    }
+    ShapeRepairPipeline rounds;
+    rounds.addStage(ShapeRepairStages::MakeConservativeSewShellsStage(0.26, true));
+    MergeDuplicateVertex::Params duplicateParams;
+    duplicateParams.zeroDistanceTolerance = 1.0e-4; // 独立于 sewing 的连接预算。
+    duplicateParams.forbidAcrossDifferentSolids = true;
+    duplicateParams.runShapeFixAfterMerge = false;
+    //rounds.addStage(ShapeRepairStages::MakeMergeDuplicateVertexStage(duplicateParams));
+    //for (const auto& stage : pipeline.getStages()) rounds.addStage(stage);
+    TopoDS_Shape working = combined;
+    for (int round = 1; round <= 1; ++round) {
+        log << "[Global round " << round << "]" << std::endl;
+        std::cout << "Global sewing/repair round " << round << "/1" << std::endl;
+        BRepBuilderAPI_Copy copy(working, Standard_True, Standard_False);
+        if (copy.Shape().IsNull()) return -1;
+        const auto result = rounds.perform(copy.Shape());
+        report(result);
+        if (!result.modified || result.rolledBack || result.resultShape.IsNull()) {
+            log << "Stop: no committed modification in round " << round << std::endl;
+            break;
+        }
+        working = result.resultShape;
+        total += result.totalRepairCount;
+        //if (round == 3) log << "Stop: reached maximum of three rounds\n";
+    }
+    std::string error;
+    const auto before = RepairDiagnostics::CollectBRepCheckFailures(original, &error);
+    if (!error.empty()) { log << error; return -1; }
+    const auto after = RepairDiagnostics::CollectBRepCheckFailures(working, &error);
+    if (!error.empty()) { log << error; return -1; }
+    const auto added = RepairDiagnostics::FindBRepCheckFailureCountIncrease(before, after);
+    if (!added.empty() || TopologyUtils::CountFreeEdges(working) > TopologyUtils::CountFreeEdges(original)) {
+        log << "Final validation failed; exporting original combined geometry. "
+            << RepairDiagnostics::DescribeBRepCheckFailures(added) << std::endl;
+        working = original;
+        total = 0;
+    }
+    log << "Final committed operations=" << total << std::endl;
+    for (const auto& entry : { std::make_pair("Original", TopoDS_Shape(original)),
+                              std::make_pair("Final", working) }) {
+        log << entry.first << " topology:";
+        for (TopAbs_ShapeEnum type : { TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX }) {
+            TopTools_IndexedMapOfShape shapes;
+            TopExp::MapShapes(entry.second, type, shapes);
+            log << ' ' << TopologyUtils::ShapeTypeName(type) << '=' << shapes.Extent();
+        }
+        log << " freeEdges=" << TopologyUtils::CountFreeEdges(entry.second) << std::endl;
+    }
+    std::vector<std::string> finalChecks;
+    RepairDiagnostics::AppendShapeCheckSummary(finalChecks, "Final", working);
+    for (const auto& message : finalChecks) log << message << std::endl;
+    // 普通 STEP writer 不传入文档，且显式关闭装配导出。
+    const int previousAssemblyMode = Interface_Static::IVal("write.step.assembly");
+    Interface_Static::SetIVal("write.step.assembly", 0);
+    const bool written = exportStepShape(working, filePath);
+    Interface_Static::SetIVal("write.step.assembly", previousAssemblyMode);
+    return written ? total : -1;
 }
 
 bool ApplicationInit::writeXcafDocumentStep(const Handle(TDocStd_Document)& doc,

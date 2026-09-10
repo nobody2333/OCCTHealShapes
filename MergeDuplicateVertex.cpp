@@ -2,6 +2,7 @@
 
 #include "GeometryUtils.h"
 #include "TopologyUtils.h"
+#include "RepairDiagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -612,8 +613,22 @@ bool MergeDuplicateVertex::validateMergeResult(
     }
 
     if (!newFailures.empty()) {
+        // 顶点替换会重建相邻 face 的 TShape，身份变化不能证明错误是新增的。
+        // 保持与流水线一致，按拓扑类型/错误状态的数量检查是否恶化。
+        const auto toDiagnostics = [](const std::vector<BRepCheckFailureInfo>& failures) {
+            RepairDiagnostics::FailureList result;
+            for (const auto& failure : failures) {
+                result.push_back({ failure.shape, failure.type, failure.statuses });
+            }
+            return result;
+        };
+        const auto increased = RepairDiagnostics::FindBRepCheckFailureCountIncrease(
+            toDiagnostics(baselineFailures), toDiagnostics(afterFailures));
+        if (increased.empty()) {
+            return true;
+        }
         errorMessage = "new BRepCheck failures after duplicate vertex merge:";
-        errorMessage += describeBRepCheckFailures(newFailures);
+        errorMessage += RepairDiagnostics::DescribeBRepCheckFailures(increased);
         if (!baselineFailures.empty()) {
             errorMessage += " baseline failures:";
             errorMessage += describeBRepCheckFailures(baselineFailures);

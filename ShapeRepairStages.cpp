@@ -1,5 +1,41 @@
 #include "ShapeRepairStages.h"
 
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeMergeDuplicateVertexStage(
+    const MergeDuplicateVertex::Params& params, bool enabled)
+{
+    ShapeRepairPipeline::Stage stage;
+    stage.name = "MergeDuplicateVertexPostSew";
+    stage.enabled = enabled;
+    stage.execute = [params](const TopoDS_Shape& inputShape) {
+        MergeDuplicateVertex merger(params);
+        ShapeRepairPipeline::StageExecutionResult result;
+        result.repairCount = merger.perform(inputShape);
+        result.resultShape = merger.getResultShape();
+        result.modified = merger.isModified();
+        result.messages = merger.getMessages();
+        return result;
+    };
+    return stage;
+}
+
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeConservativeSewShellsStage(
+    double tolerance, bool enabled)
+{
+    ShapeRepairPipeline::Stage stage;
+    stage.name = "ConservativeSewShells";
+    stage.enabled = enabled;
+    stage.execute = [tolerance](const TopoDS_Shape& inputShape) {
+        SewShells sewer(SewShells::ConservativeParams(tolerance));
+        ShapeRepairPipeline::StageExecutionResult result;
+        result.repairCount = sewer.perform(inputShape);
+        result.resultShape = sewer.getResultShape();
+        result.modified = sewer.isModified();
+        result.messages = sewer.getMessages();
+        return result;
+    };
+    return stage;
+}
+
 ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealNarrowGapStage(
     const HealNarrowGap::Params& params,
     bool enabled)

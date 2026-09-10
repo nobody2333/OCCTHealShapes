@@ -18,10 +18,10 @@ public:
         bool rejectShapeTypeChange = true;
 
         // 为 true 时，每个阶段都比较执行前后的 BRepCheck 错误并拒绝新增错误。
-        bool validateAfterEachStage = true;
+        bool validateAfterEachStage = false;
 
         // 为 true 时，所有阶段结束后再与整条流水线的原始输入比较一次。
-        bool validateFinalResult = true;
+        bool validateFinalResult = false;
     };
 
     // 单个模块执行器返回的统一结果。

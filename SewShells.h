@@ -12,6 +12,8 @@ class SewShells {
 public:
     // sewing 参数。默认策略偏保守：只接受没有新增明显拓扑问题的缝合结果。
     struct Params {
+        // 流水线保守预处理：按输入 shell 归属局部缝合，不丢面、不处理闭壳。
+        bool conservative = false;
         // BRepBuilderAPI_Sewing 使用的连接容差。
         double sewingTolerance = 1.0e-4;
         // sewing 允许使用的最小局部容差。
@@ -48,6 +50,9 @@ public:
 
     explicit SewShells(const Params& params = Params());
 
+    // tolerance 使用模型单位，独立于细缝宽度参数。
+    static Params ConservativeParams(double tolerance = 1.0e-4);
+
     // 设置输入 shape，并清空上一轮执行状态。
     void setInputShape(const TopoDS_Shape& shape);
 
@@ -81,6 +86,12 @@ private:
 
     // 对同一父 compound 下收集到的一组 shell 执行 sewing。
     bool sewShellGroup(
+        const std::vector<TopoDS_Shell>& shellGroup,
+        TopoDS_Shape& sewedShape,
+        std::string& errorMessage);
+
+    // 保守模式：固定输入 shell 归属，仅试缝跨壳自由边所在的两个面。
+    bool sewCrossShellBoundaries(
         const std::vector<TopoDS_Shell>& shellGroup,
         TopoDS_Shape& sewedShape,
         std::string& errorMessage);

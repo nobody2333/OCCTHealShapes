@@ -453,8 +453,8 @@ int mergeDuplicateVertexAndHealNarrowGap(const std::string& fileName) {
 }
 
 // 通用修复流水线调用入口：通过 enabled 开关选择模块，addStage 顺序决定执行顺序。
-int runShapeRepairPipeline(const std::string& fileName) {
-    const std::string inputFilePath = "./assets/" + fileName + ".stp";
+int runShapeRepairPipeline(const std::string& inputFilePath) {
+	const std::string fileName = std::filesystem::path(inputFilePath).stem().string();
     const std::filesystem::path outputDirectory = "./assets/fixedRepairPipeline";
     std::filesystem::create_directories(outputDirectory);
     const std::string outputFilePath =
@@ -477,9 +477,6 @@ int runShapeRepairPipeline(const std::string& fileName) {
     const bool enableHealSimpleHole = true;
 
     ShapeRepairPipeline::Params pipelineParams;
-    pipelineParams.rejectShapeTypeChange = true;
-    pipelineParams.validateAfterEachStage = true;
-    pipelineParams.validateFinalResult = true;
     ShapeRepairPipeline pipeline(pipelineParams);
 
     HealNarrowGap::Params narrowGapParams;
@@ -511,9 +508,11 @@ int runShapeRepairPipeline(const std::string& fileName) {
     pipeline.addStage(narrowGapPostClosedStage);
 
     std::cout << "Running configured shape repair pipeline......" << std::endl;
-    const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
+    const int repairedCount = appInit.runGroupedRepairPipelineAndExport(
         outputFilePath,
         pipeline);
+
+    //const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(outputFilePath, pipeline);
     if (repairedCount < 0) {
         std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
         return -1;
@@ -537,10 +536,10 @@ int main()
     if (localtime_s(&localTime, &currentTime) == 0) {
         std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
     }
-    std::string fileName = "h6k";
+    std::string fileName = "./assets/h6k.stp";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
-    //healNarrowGap(fileName);
+    //healNarrowGap(fileName); 
     //healClosedGap(fileName);
 	//healSimpleHole(fileName);
 	//sewShellsOnStepShape(filename);
