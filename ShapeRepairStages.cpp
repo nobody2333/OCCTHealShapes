@@ -1,5 +1,23 @@
 #include "ShapeRepairStages.h"
 
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealIntersectingFaceGapStage(
+    const HealIntersectingFaceGap::Params& params, bool enabled)
+{
+    ShapeRepairPipeline::Stage stage;
+    stage.name = "HealIntersectingFaceGap";
+    stage.enabled = enabled;
+    stage.execute = [params](const TopoDS_Shape& inputShape) {
+        HealIntersectingFaceGap healer(params);
+        ShapeRepairPipeline::StageExecutionResult result;
+        result.repairCount = healer.perform(inputShape);
+        result.resultShape = healer.getResultShape();
+        result.modified = healer.isModified();
+        result.messages = healer.getMessages();
+        return result;
+    };
+    return stage;
+}
+
 ShapeRepairPipeline::Stage ShapeRepairStages::MakeMergeDuplicateVertexStage(
     const MergeDuplicateVertex::Params& params, bool enabled)
 {

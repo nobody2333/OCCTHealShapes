@@ -474,7 +474,8 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     const bool enableHealNarrowGapPostClosedPass =
         enableHealNarrowGap && enableHealClosedNarrowGap;
     // 自动补孔需要结合模型单位设置尺寸范围；当前已启用。
-    const bool enableHealSimpleHole = true;
+    const bool enableHealSimpleHole = false;
+    const bool enableHealIntersectingFaceGap = true;
 
     ShapeRepairPipeline::Params pipelineParams;
     ShapeRepairPipeline pipeline(pipelineParams);
@@ -482,6 +483,7 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     HealNarrowGap::Params narrowGapParams;
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
+    HealIntersectingFaceGap::Params intersectingFaceGapParams;
 
     // 当前启用 HealNarrowGap 的 crossed-face 后置原支撑面重建策略。
     narrowGapParams.enableCrossedFaceBoundaryRepair = true;
@@ -500,6 +502,10 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     pipeline.addStage(ShapeRepairStages::MakeHealClosedNarrowGapStage(
         closedNarrowGapParams,
         enableHealClosedNarrowGap));
+    // 第四阶段：P-Q 连线单面投影，重建局部穿插的两侧 face。
+    pipeline.addStage(ShapeRepairStages::MakeHealIntersectingFaceGapStage(
+        intersectingFaceGapParams,
+        enableHealIntersectingFaceGap));
     ShapeRepairPipeline::Stage narrowGapPostClosedStage =
         ShapeRepairStages::MakeHealNarrowGapStage(
             narrowGapParams,

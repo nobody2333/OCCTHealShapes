@@ -3,6 +3,7 @@
 #include "HealClosedNarrowGap.h"
 #include "HealNarrowGap.h"
 #include "HealSimpleHole.h"
+#include "HealIntersectingFaceGap.h"
 #include "ShapeRepairPipeline.h"
 #include "SewShells.h"
 #include "MergeDuplicateVertex.h"
@@ -11,6 +12,10 @@
 // 新模块可以在这里增加便捷工厂，也可以在调用处直接构造自定义 Stage。
 namespace ShapeRepairStages
 {
+    ShapeRepairPipeline::Stage MakeHealIntersectingFaceGapStage(
+        const HealIntersectingFaceGap::Params& params = HealIntersectingFaceGap::Params(),
+        bool enabled = true);
+
     ShapeRepairPipeline::Stage MakeMergeDuplicateVertexStage(
         const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params(),
         bool enabled = true);

@@ -48,6 +48,9 @@
     <ClCompile Include="HealNarrowGap.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="HealIntersectingFaceGap.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="HealSimpleHole.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -96,6 +99,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="HealNarrowGap.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="HealIntersectingFaceGap.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="HealSimpleHole.h">

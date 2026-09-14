@@ -14,6 +14,7 @@ occt_vc14-64-with-debug/
 assets/
 results/
 feature-docs/
+tools/
 task.md
 
 # User-specific files (MonoDevelop/Xamarin Studio)
