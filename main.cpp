@@ -129,10 +129,12 @@ void mergeShortEdge(const std::string& fileName) {
     return;
 }
 
-int healNarrowGap(const std::string& fileName) {
-    std::string inputFilePath = "./assets/" + fileName + ".stp";
-    std::filesystem::create_directories("./assets/fixedNarrowGap");
-    std::string outputFilePath = "./assets/fixedNarrowGap/HealGap_" + fileName + ".stp";
+int healNarrowGap(const std::string& inputFilePath) {
+    const std::string fileName = std::filesystem::path(inputFilePath).stem().string();
+    const std::filesystem::path outputDirectory = "./assets/fixedNarrowGap";
+    std::filesystem::create_directories(outputDirectory);
+    const std::string outputFilePath =
+        (outputDirectory / ("HealGap_" + fileName + ".stp")).string();
     ApplicationInit appInit;
 
     auto t0 = std::chrono::system_clock::now();
@@ -156,6 +158,7 @@ int healNarrowGap(const std::string& fileName) {
     }
 
     HealNarrowGap::Params params;
+    params.repairStrategy = HealNarrowGap::RepairStrategy::Auto;
     std::cout << "Healing narrow gaps......" << std::endl;
     const int repairedCount = appInit.healNarrowGapsOnLowestContainersAndExport(outputFilePath, params);
     if (repairedCount < 0) {
@@ -542,14 +545,14 @@ int main()
     if (localtime_s(&localTime, &currentTime) == 0) {
         std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
     }
-    std::string fileName = "./assets/h6k.stp";
+    std::string fileName = "./assets/dlr-f4.stp";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
-    //healNarrowGap(fileName); 
+    healNarrowGap(fileName); 
     //healClosedGap(fileName);
 	//healSimpleHole(fileName);
 	//sewShellsOnStepShape(filename);
-	runShapeRepairPipeline(fileName);
+	//runShapeRepairPipeline(fileName);
     const std::time_t endTime = std::time(nullptr);
     if (localtime_s(&localTime, &endTime) == 0) {
         std::cout << "end time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
