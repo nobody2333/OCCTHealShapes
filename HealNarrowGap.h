@@ -25,27 +25,25 @@ public:
 
     // 修复参数：只约束本类负责的窄缝场景，不做全局 sewing 或补面。
     struct Params {
-        // Auto 保留原有三种策略顺序，并从普通跳过列表执行 crossed-face 后置筛选。
+        // Auto 依次尝试单边替换、中线塌缩，再执行 crossed-face 后置筛选。
         RepairStrategy repairStrategy = RepairStrategy::Auto;
         // 是否在 Auto 的常规策略全部停止后扫描 crossed-face 候选。
-        bool enableCrossedFaceBoundaryRepair = true;
+        bool enableCrossedFaceBoundaryRepair = false;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
         double candidateMaxGap = 1.1e-1;
-        // 真正允许执行拓扑替换的最大边间距离，用于二次严格过滤。
-        double repairMaxGap = 1.1e-1;
+        // ReplaceOneSide 允许尝试单边替换的最大候选边间距离。
+        double replaceOneSideMaxGap = 1.0e-1;
         // SurfaceIntersection 允许处理的最大边间距离。
         double surfaceIntersectionMaxGap = 1.0e-1;
         // SurfaceIntersection 的求交容差；crossed-face 后置修复不使用此参数。
         double surfaceIntersectionFuzzyTol = 1.0e-1;
         // 中线塌缩允许处理的最大边间距离；不参与 pcurve/face/ShapeFix 容差计算。
-        double midlineMaxGap = 1.0e-1;
+        double midlineMaxGap = 1.1e-1;
         // crossed-face 使用原支撑面重建时允许的最大候选边间距离。
         // 实际门槛还会至少覆盖两个候选 face 的已有 tolerance。
         double crossedFaceOriginalSurfaceMaxGap = 1.5e-1;
-        // 保留的 pcurve 配置容差；当前新共享 edge 继承两条原 edge 的最大 tolerance。
-        double pcurveTol = 1.0e-5;
-        // 保留的 pcurve 容差上限；当前不截断从原候选 edge 继承的 tolerance。
-        double maxPCurveTol = 1.0e-3;
+        // 普通策略的 pcurve 修复和校验容差下限；不降低原候选 edge 的已有 tolerance。
+        double pcurveTol = 1.0e-1;
         // face 重建容差，用于新建 face 和局部 wire/face 修复。
         double faceTol = 1.0e-5;
         // face 容差上限。
