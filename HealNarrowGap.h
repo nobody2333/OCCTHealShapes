@@ -28,7 +28,7 @@ public:
         // Auto 依次尝试单边替换、中线塌缩，再执行 crossed-face 后置筛选。
         RepairStrategy repairStrategy = RepairStrategy::Auto;
         // 是否在 Auto 的常规策略全部停止后扫描 crossed-face 候选。
-        bool enableCrossedFaceBoundaryRepair = false;
+        bool enableCrossedFaceBoundaryRepair = true;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
         double candidateMaxGap = 1.1e-1;
         // ReplaceOneSide 允许尝试单边替换的最大候选边间距离。

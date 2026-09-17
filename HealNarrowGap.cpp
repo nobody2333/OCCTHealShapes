@@ -950,7 +950,7 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::selectCrossedFaceCandidates
         }
 
         // crossed-face 只允许修复同一个唯一 owner shell 内的两个 face。
-        // 在 edge 相交和双向投影之前提前排除跨 shell 候选。
+        // 在双向投影之前提前排除跨 shell 候选。
         if (!faceShellMap.Contains(candidate.faceA) ||
             !faceShellMap.Contains(candidate.faceB)) {
             appendMessage(
@@ -978,22 +978,8 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::selectCrossedFaceCandidates
             continue;
         }
 
-        // crossed-face 只接受两条候选 edge 在公共端点之外发生相交的边对。
-        // face 自身的 wire 分支或遍历异常不再参与重建侧选择。
-        std::string intersectionEvidence;
-        std::string intersectionError;
-        if (!haveCandidateEdgesIntersectionAwayFromEndpoints(
-                candidate,
-                intersectionEvidence,
-                intersectionError)) {
-            appendMessage(
-                messages,
-                "Crossed-face skipped candidate rejected: "
-                    + (intersectionError.empty()
-                        ? intersectionEvidence
-                        : intersectionError));
-            continue;
-        }
+        // 不再要求候选边在公共端点之外相交；通过其余筛选后尝试重建，
+        // 是否提交仍由修复后的完整校验决定。
 
         EdgeChoice selectionChoice;
         std::string selectionMessage;
@@ -1045,10 +1031,8 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::selectCrossedFaceCandidates
                 similarityError)) {
             appendMessage(
                 messages,
-                "Crossed-face skipped candidate rejected after intersection evidence: "
+                "Crossed-face skipped candidate rejected: "
                 + similarityError
-                + "; intersection="
-                + intersectionEvidence
                 + "; selection="
                 + selectionMessage);
             continue;
@@ -1084,7 +1068,6 @@ std::vector<HealNarrowGap::Candidate> HealNarrowGap::selectCrossedFaceCandidates
                         << ", meanGap=" << candidate.meanGap
                         << ", crossedFaceGapLimit=" << crossedFaceGapLimit
                         << ", sampleCount=" << candidate.usedSampleCount
-                        << ", intersection=" << intersectionEvidence
                         << ", selection=" << selectionMessage;
         appendMessage(messages, acceptedMessage.str());
     }
@@ -4586,7 +4569,7 @@ bool HealNarrowGap::tryRepairByRebuildingCrossedFaceBoundary(
         messages_,
         "Crossed-face rebuild selection: " + selectionMessage);
 
-    // 先确认存在 crossed-face 证据，再判断两条候选边是否足够接近。
+    // 重建前再次确认两条候选边足够接近，不要求额外的相交证据。
     // 面本身已经声明的 tolerance 高于配置值时，至少尊重输入模型的已有精度。
     const double faceBasedGapTolerance = std::max({
         Precision::Confusion(),
