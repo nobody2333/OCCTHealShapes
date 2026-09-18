@@ -223,13 +223,13 @@ int healClosedGap(const std::string& fileName) {
     return repairedCount;
 }
 
-// 单独运行简单孔洞修复；容器遍历和 STEP 导出复用通用流水线入口。
-int healSimpleHole(const std::string& fileName) {
-    const std::string inputFilePath = "./assets/" + fileName + ".stp";
-    const std::filesystem::path outputDirectory = "./assets/fixedSimpleHole";
+// 单独运行形状预处理；容器遍历和 STEP 导出复用通用流水线入口。
+int runShapePreProcess(const std::string& inputFilePath) {
+    const std::string fileName = std::filesystem::path(inputFilePath).stem().string();
+    const std::filesystem::path outputDirectory = "./assets/fixedShapePreProcess";
     std::filesystem::create_directories(outputDirectory);
     const std::string outputFilePath =
-        (outputDirectory / ("HealSimpleHole_" + fileName + ".stp")).string();
+        (outputDirectory / ("ShapePreProcess_" + fileName + ".stp")).string();
 
     ApplicationInit appInit;
     const auto startTime = std::chrono::system_clock::now();
@@ -250,32 +250,32 @@ int healSimpleHole(const std::string& fileName) {
             static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
     }
 
-    HealSimpleHole::Params holeParams;
-    // 使用 HealSimpleHole::Params 中统一的已验证默认值。自动补孔无法仅凭拓扑
-    // 区分设计开口；处理其他模型尺度时仍应按模型单位覆盖尺寸与误差参数。
+    ShapePreProcess::Params preProcessParams;
+    preProcessParams.enableDuplicateVertexMerge = true;
+    preProcessParams.enableShortBoundaryEdgeCollapse = true;
 
     ShapeRepairPipeline pipeline;
     pipeline.addStage(
-        ShapeRepairStages::MakeHealSimpleHoleStage(holeParams));
+        ShapeRepairStages::MakeShapePreProcessStage(preProcessParams));
 
-    std::cout << "Healing simple holes......" << std::endl;
-    const int repairedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
+    std::cout << "Preprocessing shapes......" << std::endl;
+    const int processedCount = appInit.runRepairPipelineOnLowestContainersAndExport(
         outputFilePath,
         pipeline);
-    if (repairedCount < 0) {
+    if (processedCount < 0) {
         std::cerr << "STEP file write failed: " << outputFilePath << std::endl;
         return -1;
     }
 
-    std::cout << "Repaired simple-hole candidate count: "
-              << repairedCount << std::endl;
+    std::cout << "Preprocessing operation count: "
+              << processedCount << std::endl;
     std::cout << "STEP file write successfully to " << outputFilePath << std::endl;
 
     const auto endTime = std::chrono::system_clock::now();
     std::cout << "Total cost: "
               << std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime).count()
               << " s" << std::endl;
-    return repairedCount;
+    return processedCount;
 }
 
 int mergeDuplicateVertex(const std::string& fileName) {
@@ -304,7 +304,7 @@ int mergeDuplicateVertex(const std::string& fileName) {
         std::cout << std::format("Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
     }
 
-    MergeDuplicateVertex::Params params;
+    ShapePreProcess::Params params;
 
     std::cout << "Merging duplicate vertices......" << std::endl;
     const int mergedCount = appInit.mergeDuplicateVerticesOnLowestContainersAndExport(outputFilePath, params);
@@ -341,7 +341,7 @@ int mergeDuplicateVertexOnStepShape(const std::string& fileName) {
         << std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count()
         << " s" << std::endl;
 
-    MergeDuplicateVertex::Params params;
+    ShapePreProcess::Params params;
     params.forbidAcrossDifferentSolids = false;
 
     std::cout << "Merging duplicate vertices on imported STEP shape......" << std::endl;
@@ -431,7 +431,7 @@ int mergeDuplicateVertexAndHealNarrowGap(const std::string& fileName) {
         std::cout << std::format("Shape[{}] type: {}", i, static_cast<int>(inputShapes[i].ShapeType())) << std::endl;
     }
 
-    MergeDuplicateVertex::Params duplicateVertexParams;
+    ShapePreProcess::Params duplicateVertexParams;
     HealNarrowGap::Params narrowGapParams;
 
     std::cout << "Merging duplicate vertices, then healing narrow gaps......" << std::endl;
@@ -478,15 +478,16 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
         enableHealNarrowGap && enableHealClosedNarrowGap;
     // 自动补孔需要结合模型单位设置尺寸范围；当前已启用。
     const bool enableHealSimpleHole = false;
-    const bool enableHealIntersectingFaceGap = true;
 
     ShapeRepairPipeline::Params pipelineParams;
     ShapeRepairPipeline pipeline(pipelineParams);
 
+    ShapePreProcess::Params preProcessParams;
+    preProcessParams.enableDuplicateVertexMerge = true;
+    preProcessParams.enableShortBoundaryEdgeCollapse = true;
     HealNarrowGap::Params narrowGapParams;
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
-    HealIntersectingFaceGap::Params intersectingFaceGapParams;
 
     // 当前启用 HealNarrowGap 的 crossed-face 后置原支撑面重建策略。
     narrowGapParams.enableCrossedFaceBoundaryRepair = true;
@@ -495,6 +496,8 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
 
 	closedNarrowGapParams.midlineConstructionMode = HealClosedNarrowGap::MidlineConstructionMode::ProjectionCorrespondence;
 
+    // 先整理边界端点，再执行已有修复阶段。
+    pipeline.addStage(ShapeRepairStages::MakeShapePreProcessStage(preProcessParams));
     // 添加顺序就是执行顺序：先补孔，避免细缝修复改变孔洞自由边界的拓扑关系。
     pipeline.addStage(ShapeRepairStages::MakeHealSimpleHoleStage(
         simpleHoleParams,
@@ -505,10 +508,6 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     pipeline.addStage(ShapeRepairStages::MakeHealClosedNarrowGapStage(
         closedNarrowGapParams,
         enableHealClosedNarrowGap));
-    // 第四阶段：P-Q 连线单面投影，重建局部穿插的两侧 face。
-    pipeline.addStage(ShapeRepairStages::MakeHealIntersectingFaceGapStage(
-        intersectingFaceGapParams,
-        enableHealIntersectingFaceGap));
     ShapeRepairPipeline::Stage narrowGapPostClosedStage =
         ShapeRepairStages::MakeHealNarrowGapStage(
             narrowGapParams,
@@ -545,14 +544,14 @@ int main()
     if (localtime_s(&localTime, &currentTime) == 0) {
         std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
     }
-    std::string fileName = "./assets/h6k.stp";
+    std::string fileName = "./assets/h6k_cf.stp";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
-    healNarrowGap(fileName); 
+    //healNarrowGap(fileName);
     //healClosedGap(fileName);
-	//healSimpleHole(fileName);
+	//runShapePreProcess(fileName);
 	//sewShellsOnStepShape(filename);
-	//runShapeRepairPipeline(fileName);
+	runShapeRepairPipeline(fileName);
     const std::time_t endTime = std::time(nullptr);
     if (localtime_s(&localTime, &endTime) == 0) {
         std::cout << "end time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;

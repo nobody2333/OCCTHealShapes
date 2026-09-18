@@ -398,7 +398,7 @@ bool ApplicationInit::exportStepShape(const TopoDS_Shape& shape, const std::stri
 
 int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
     const std::string& filePath,
-    const MergeDuplicateVertex::Params& params)
+    const ShapePreProcess::Params& params)
 {
     const std::filesystem::path mergeLogPath =
         std::filesystem::path("assets") / "fixedDuplicateVertexStepShape" / "MergeDuplicateVertexStepShapeLog.txt";
@@ -406,11 +406,11 @@ int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
     {
         std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
         if (logFile) {
-            logFile << "MergeDuplicateVertex STEP shape log" << std::endl;
+            logFile << "Shape preprocessing (STEP shape)" << std::endl;
             logFile << "Output STEP: " << filePath << std::endl << std::endl;
         }
         else {
-            std::cerr << "Warning: Cannot open MergeDuplicateVertex STEP shape log file: "
+            std::cerr << "Warning: Cannot open preprocessing STEP log file: "
                       << mergeLogPath.string() << std::endl;
         }
     }
@@ -420,15 +420,16 @@ int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
         return 0;
     }
 
-    MergeDuplicateVertex duplicateVertexMerger(params);
+    ShapePreProcess duplicateVertexMerger(params);
     duplicateVertexMerger.setInputShape(importedStepShape_);
     const int mergedCount = duplicateVertexMerger.perform();
 
     {
         std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
         if (logFile) {
-            logFile << "[MergeDuplicateVertex][StepShape]"
-                    << " mergedCount=" << mergedCount
+            logFile << "[ShapePreProcess][StepShape]"
+                    << " mergedPairs=" << duplicateVertexMerger.getMergedCount()
+                    << ", shortEdgeCases=" << duplicateVertexMerger.getCollapsedBoundaryCount()
                     << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
                     << ", inputShapeType=" << static_cast<int>(importedStepShape_.ShapeType())
                     << std::endl;
@@ -443,19 +444,19 @@ int ApplicationInit::mergeDuplicateVerticesOnStepShapeAndExport(
             logFile << std::endl;
         }
         else {
-            std::cerr << "Warning: Cannot append MergeDuplicateVertex STEP shape log file: "
+            std::cerr << "Warning: Cannot append preprocessing STEP log file: "
                       << mergeLogPath.string() << std::endl;
         }
     }
 
     TopoDS_Shape processedShape = duplicateVertexMerger.getResultShape();
     if (processedShape.IsNull()) {
-        std::cerr << "Error: MergeDuplicateVertex produced a null STEP shape result." << std::endl;
+        std::cerr << "Error: ShapePreProcess produced a null STEP shape result." << std::endl;
         return 0;
     }
 
     if (processedShape.ShapeType() != importedStepShape_.ShapeType()) {
-        std::cerr << "Error: MergeDuplicateVertex changed STEP shape type from "
+        std::cerr << "Error: ShapePreProcess changed STEP shape type from "
                   << static_cast<int>(importedStepShape_.ShapeType()) << " to "
                   << static_cast<int>(processedShape.ShapeType()) << "." << std::endl;
         return 0;
@@ -692,7 +693,7 @@ int ApplicationInit::mergeShortEdgesOnLowestContainersAndExport(const std::strin
 
 int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
     const std::string& filePath,
-    const MergeDuplicateVertex::Params& params)
+    const ShapePreProcess::Params& params)
 {
     const std::filesystem::path mergeLogPath =
         std::filesystem::path("assets") / "fixedDuplicateVertex" / "MergeDuplicateVertexLog.txt";
@@ -700,11 +701,11 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
     {
         std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::trunc);
         if (logFile) {
-            logFile << "MergeDuplicateVertex log" << std::endl;
+            logFile << "Shape preprocessing" << std::endl;
             logFile << "Output STEP: " << filePath << std::endl << std::endl;
         }
         else {
-            std::cerr << "Warning: Cannot open MergeDuplicateVertex log file: "
+            std::cerr << "Warning: Cannot open preprocessing log file: "
                       << mergeLogPath.string() << std::endl;
         }
     }
@@ -743,15 +744,16 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
             continue;
         }
 
-        MergeDuplicateVertex duplicateVertexMerger(params);
+        ShapePreProcess duplicateVertexMerger(params);
         duplicateVertexMerger.setInputShape(originalShape);
         const int containerMergedCount = duplicateVertexMerger.perform();
 
         {
             std::ofstream logFile(mergeLogPath, std::ios::out | std::ios::app);
             if (logFile) {
-                logFile << "[MergeDuplicateVertex] Container " << i
-                        << ", mergedCount=" << containerMergedCount
+                logFile << "[ShapePreProcess] Container " << i
+                        << ", mergedPairs=" << duplicateVertexMerger.getMergedCount()
+                        << ", shortEdgeCases=" << duplicateVertexMerger.getCollapsedBoundaryCount()
                         << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
                         << ", inputShapeType=" << static_cast<int>(originalShape.ShapeType())
                         << std::endl;
@@ -766,7 +768,7 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
                 logFile << std::endl;
             }
             else {
-                std::cerr << "Warning: Cannot append MergeDuplicateVertex log file: "
+                std::cerr << "Warning: Cannot append preprocessing log file: "
                           << mergeLogPath.string() << std::endl;
             }
         }
@@ -796,7 +798,7 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
 
     shapeTool->UpdateAssemblies();
     refreshShapeCache();
-    std::cout << "Replaced lowest containers after duplicate-vertex merge: " << replacedCount << std::endl;
+    std::cout << "Replaced lowest containers after preprocessing: " << replacedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
         return -1;
     }
@@ -806,7 +808,7 @@ int ApplicationInit::mergeDuplicateVerticesOnLowestContainersAndExport(
 
 int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAndExport(
     const std::string& filePath,
-    const MergeDuplicateVertex::Params& duplicateVertexParams,
+    const ShapePreProcess::Params& duplicateVertexParams,
     const HealNarrowGap::Params& narrowGapParams)
 {
     const std::filesystem::path chainLogPath =
@@ -815,7 +817,7 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
     {
         std::ofstream logFile(chainLogPath, std::ios::out | std::ios::trunc);
         if (logFile) {
-            logFile << "MergeDuplicateVertex + HealNarrowGap log" << std::endl;
+            logFile << "Shape preprocessing + HealNarrowGap" << std::endl;
             logFile << "Output STEP: " << filePath << std::endl << std::endl;
         }
         else {
@@ -862,15 +864,16 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
         TopoDS_Shape workingShape = originalShape;
         bool containerModified = false;
 
-        MergeDuplicateVertex duplicateVertexMerger(duplicateVertexParams);
+        ShapePreProcess duplicateVertexMerger(duplicateVertexParams);
         duplicateVertexMerger.setInputShape(workingShape);
         const int containerDuplicateMergedCount = duplicateVertexMerger.perform();
 
         {
             std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
             if (logFile) {
-                logFile << "[MergeDuplicateVertex] Container " << i
-                        << ", mergedCount=" << containerDuplicateMergedCount
+                logFile << "[ShapePreProcess] Container " << i
+                        << ", mergedPairs=" << duplicateVertexMerger.getMergedCount()
+                        << ", shortEdgeCases=" << duplicateVertexMerger.getCollapsedBoundaryCount()
                         << ", modified=" << (duplicateVertexMerger.isModified() ? "true" : "false")
                         << ", inputShapeType=" << static_cast<int>(workingShape.ShapeType())
                         << std::endl;
@@ -896,7 +899,7 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
         else if (duplicateVertexMerger.isModified()) {
             std::ofstream logFile(chainLogPath, std::ios::out | std::ios::app);
             if (logFile) {
-                logFile << "  - Warning: duplicate-vertex result is invalid or changed shape type; "
+                logFile << "  - Warning: preprocessing result is invalid or changed shape type; "
                         << "HealNarrowGap will use original container shape." << std::endl;
             }
         }
@@ -956,9 +959,9 @@ int ApplicationInit::mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAn
 
     shapeTool->UpdateAssemblies();
     refreshShapeCache();
-    std::cout << "Replaced lowest containers after duplicate-vertex/narrow-gap repair: "
+    std::cout << "Replaced lowest containers after preprocessing/narrow-gap repair: "
               << replacedCount << std::endl;
-    std::cout << "Duplicate vertices merged: " << duplicateMergedCount
+    std::cout << "Preprocessing operations: " << duplicateMergedCount
               << ", narrow gaps repaired: " << narrowGapRepairedCount << std::endl;
     if (!writeXcafDocumentStep(aDoc_, filePath, true)) {
         return -1;
@@ -1490,11 +1493,11 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
     }
     ShapeRepairPipeline rounds;
     rounds.addStage(ShapeRepairStages::MakeConservativeSewShellsStage(0.26, true));
-    MergeDuplicateVertex::Params duplicateParams;
+    ShapePreProcess::Params duplicateParams;
     duplicateParams.zeroDistanceTolerance = 1.0e-4; // 独立于 sewing 的连接预算。
     duplicateParams.forbidAcrossDifferentSolids = true;
     duplicateParams.runShapeFixAfterMerge = false;
-    //rounds.addStage(ShapeRepairStages::MakeMergeDuplicateVertexStage(duplicateParams));
+    //rounds.addStage(ShapeRepairStages::MakeShapePreProcessStage(duplicateParams));
     //for (const auto& stage : pipeline.getStages()) rounds.addStage(stage);
     TopoDS_Shape working = combined;
     for (int round = 1; round <= 1; ++round) {

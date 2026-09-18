@@ -48,13 +48,10 @@
     <ClCompile Include="HealNarrowGap.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="HealIntersectingFaceGap.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="HealSimpleHole.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="MergeDuplicateVertex.cpp">
+    <ClCompile Include="ShapePreProcess.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="SewShells.cpp">
@@ -101,13 +98,10 @@
     <ClInclude Include="HealNarrowGap.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="HealIntersectingFaceGap.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="HealSimpleHole.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="MergeDuplicateVertex.h">
+    <ClInclude Include="ShapePreProcess.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="SewShells.h">

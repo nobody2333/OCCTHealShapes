@@ -18,7 +18,7 @@
 #include "MergeShortEdge.h"
 #include "HealNarrowGap.h"
 #include "HealClosedNarrowGap.h"
-#include "MergeDuplicateVertex.h"
+#include "ShapePreProcess.h"
 #include "ShapeRepairPipeline.h"
 #include "SewShells.h"
 
@@ -40,7 +40,7 @@ public:
     bool exportStepShape(const TopoDS_Shape& shape, const std::string& filePath) const;
     int mergeDuplicateVerticesOnStepShapeAndExport(
         const std::string& filePath,
-        const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params());
+        const ShapePreProcess::Params& params = ShapePreProcess::Params());
     int sewShellsOnStepShapeAndExport(
         const std::string& filePath,
         const SewShells::Params& params = SewShells::Params());
@@ -55,10 +55,10 @@ public:
         const HealClosedNarrowGap::Params& params = HealClosedNarrowGap::Params());
     int mergeDuplicateVerticesOnLowestContainersAndExport(
         const std::string& filePath,
-        const MergeDuplicateVertex::Params& params = MergeDuplicateVertex::Params());
+        const ShapePreProcess::Params& params = ShapePreProcess::Params());
     int mergeDuplicateVerticesAndHealNarrowGapsOnLowestContainersAndExport(
         const std::string& filePath,
-        const MergeDuplicateVertex::Params& duplicateVertexParams = MergeDuplicateVertex::Params(),
+        const ShapePreProcess::Params& duplicateVertexParams = ShapePreProcess::Params(),
         const HealNarrowGap::Params& narrowGapParams = HealNarrowGap::Params());
     // 在每个最低可编辑容器上执行调用方配置的修复流水线，最后统一写回并导出。
     int runRepairPipelineOnLowestContainersAndExport(

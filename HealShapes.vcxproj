@@ -147,7 +147,6 @@
   <ItemGroup>
     <ClCompile Include="ApplicationInit.cpp" />
     <ClCompile Include="HealClosedNarrowGap.cpp" />
-    <ClCompile Include="HealIntersectingFaceGap.cpp" />
     <ClCompile Include="main.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
@@ -156,7 +155,7 @@
     <ClCompile Include="HealNarrowGap.cpp" />
     <ClCompile Include="HealSimpleHole.cpp" />
     <ClCompile Include="Logger.cpp" />
-    <ClCompile Include="MergeDuplicateVertex.cpp" />
+    <ClCompile Include="ShapePreProcess.cpp" />
     <ClCompile Include="MergeShortEdge.cpp" />
     <ClCompile Include="RepairDiagnostics.cpp" />
     <ClCompile Include="ShapeRepairPipeline.cpp" />
@@ -177,11 +176,10 @@
     <ClInclude Include="ApplicationInit.h" />
     <ClInclude Include="GeometryUtils.h" />
     <ClInclude Include="HealClosedNarrowGap.h" />
-    <ClInclude Include="HealIntersectingFaceGap.h" />
     <ClInclude Include="HealNarrowGap.h" />
     <ClInclude Include="HealSimpleHole.h" />
     <ClInclude Include="Logger.h" />
-    <ClInclude Include="MergeDuplicateVertex.h" />
+    <ClInclude Include="ShapePreProcess.h" />
     <ClInclude Include="MergeShortEdge.h" />
     <ClInclude Include="RepairDiagnostics.h" />
     <ClInclude Include="ShapeRepairPipeline.h" />

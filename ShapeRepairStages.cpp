@@ -1,36 +1,18 @@
 #include "ShapeRepairStages.h"
 
-ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealIntersectingFaceGapStage(
-    const HealIntersectingFaceGap::Params& params, bool enabled)
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeShapePreProcessStage(
+    const ShapePreProcess::Params& params, bool enabled)
 {
     ShapeRepairPipeline::Stage stage;
-    stage.name = "HealIntersectingFaceGap";
+    stage.name = "ShapePreProcess";
     stage.enabled = enabled;
     stage.execute = [params](const TopoDS_Shape& inputShape) {
-        HealIntersectingFaceGap healer(params);
+        ShapePreProcess preProcess(params);
         ShapeRepairPipeline::StageExecutionResult result;
-        result.repairCount = healer.perform(inputShape);
-        result.resultShape = healer.getResultShape();
-        result.modified = healer.isModified();
-        result.messages = healer.getMessages();
-        return result;
-    };
-    return stage;
-}
-
-ShapeRepairPipeline::Stage ShapeRepairStages::MakeMergeDuplicateVertexStage(
-    const MergeDuplicateVertex::Params& params, bool enabled)
-{
-    ShapeRepairPipeline::Stage stage;
-    stage.name = "MergeDuplicateVertexPostSew";
-    stage.enabled = enabled;
-    stage.execute = [params](const TopoDS_Shape& inputShape) {
-        MergeDuplicateVertex merger(params);
-        ShapeRepairPipeline::StageExecutionResult result;
-        result.repairCount = merger.perform(inputShape);
-        result.resultShape = merger.getResultShape();
-        result.modified = merger.isModified();
-        result.messages = merger.getMessages();
+        result.repairCount = preProcess.perform(inputShape);
+        result.resultShape = preProcess.getResultShape();
+        result.modified = preProcess.isModified();
+        result.messages = preProcess.getMessages();
         return result;
     };
     return stage;
