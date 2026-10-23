@@ -1,4 +1,4 @@
-#include "ApplicationInit.h"
+﻿#include "ApplicationInit.h"
 
 #include <cctype>
 #include <algorithm>
@@ -1211,14 +1211,13 @@ int ApplicationInit::runRepairPipelineOnLowestContainersAndExport(
 {
     const std::filesystem::path outputPath(filePath);
     const std::filesystem::path outputDirectory = outputPath.parent_path().empty()
-        ? std::filesystem::path(".")
-        : outputPath.parent_path();
+        ? std::filesystem::path(".") : outputPath.parent_path();
     const std::filesystem::path pipelineLogPath =
         outputDirectory / "ShapeRepairPipelineLog.txt";
     std::filesystem::create_directories(outputDirectory);
 
     {
-        std::ofstream logFile(pipelineLogPath, std::ios::out | std::ios::trunc);
+        std::ofstream logFile(pipelineLogPath, std::ios::trunc);
         if (logFile) {
             logFile << "ShapeRepairPipeline log" << std::endl;
             logFile << "Output STEP: " << filePath << std::endl;
@@ -1453,13 +1452,13 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
     }
     if (uniquePieces.empty()) return -1;
     log << "Grouped geometry repair: freeRoots=" << roots.Length()
-        << ", uniquePieces=" << uniquePieces.size() << ", maxRounds=3" << std::endl;
+        << ", uniquePieces=" << uniquePieces.size() << std::endl;
 
     auto report = [&](const ShapeRepairPipeline::Result& result) {
         for (const auto& stage : result.stageReports) {
             log << "[Stage " << stage.name << "] accepted=" << stage.accepted
                 << ", modified=" << stage.modified << ", repairCount=" << stage.repairCount
-                << ", rejection=" << stage.rejectionReason << '\n';
+                << ", rejection reason=" << stage.rejectionReason << '\n';
             for (const auto& message : stage.messages) log << message << '\n';
         }
         for (const auto& message : result.messages) log << message << '\n';
@@ -1493,12 +1492,7 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
     }
     ShapeRepairPipeline rounds;
     rounds.addStage(ShapeRepairStages::MakeConservativeSewShellsStage(0.26, true));
-    ShapePreProcess::Params duplicateParams;
-    duplicateParams.zeroDistanceTolerance = 1.0e-4; // 独立于 sewing 的连接预算。
-    duplicateParams.forbidAcrossDifferentSolids = true;
-    duplicateParams.runShapeFixAfterMerge = false;
-    //rounds.addStage(ShapeRepairStages::MakeShapePreProcessStage(duplicateParams));
-    //for (const auto& stage : pipeline.getStages()) rounds.addStage(stage);
+
     TopoDS_Shape working = combined;
     for (int round = 1; round <= 1; ++round) {
         log << "[Global round " << round << "]" << std::endl;
@@ -1513,7 +1507,6 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
         }
         working = result.resultShape;
         total += result.totalRepairCount;
-        //if (round == 3) log << "Stop: reached maximum of three rounds\n";
     }
     std::string error;
     const auto before = RepairDiagnostics::CollectBRepCheckFailures(original, &error);

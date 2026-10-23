@@ -42,6 +42,7 @@ public:
 
 	/// <summary>
 	/// 为边在指定面上补建并校验 pcurve，同时修正 2D 方向和 same-parameter。
+	/// 常规修复失败时，对非周期、非闭合支撑面尝试有界自适应投影插值重建。
 	/// </summary>
 	static bool RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
 	                                      const TopoDS_Face& face,

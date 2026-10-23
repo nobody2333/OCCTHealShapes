@@ -1,12 +1,16 @@
-#include "HealClosedNarrowGap.h"
+﻿#include "HealClosedNarrowGap.h"
 
 #include "GeometryUtils.h"
 #include "RepairDiagnostics.h"
 #include "TopologyUtils.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <numeric>
+#include <set>
 #include <sstream>
 
 #include <BRep_Builder.hxx>
@@ -280,9 +284,255 @@ bool findUniqueEdgeUseOrientation(
     return true;
 }
 
-std::vector<BoundaryLoop> buildBoundaryLoops(const TopoDS_Shape& shape)
+// 仅用于边界分组；集合元素是当前待处理集合中的局部 edge 索引。
+struct BoundaryEdgeSets {
+    std::vector<std::size_t> parents;
+    std::vector<std::size_t> sizes;
+
+    explicit BoundaryEdgeSets(std::size_t count)
+        : parents(count), sizes(count, 1)
+    {
+        std::iota(parents.begin(), parents.end(), std::size_t{0});
+    }
+
+    std::size_t find(std::size_t index)
+    {
+        while (parents[index] != index) {
+            parents[index] = parents[parents[index]];
+            index = parents[index];
+        }
+        return index;
+    }
+
+    void unite(std::size_t first, std::size_t second)
+    {
+        first = find(first);
+        second = find(second);
+        if (first == second) {
+            return;
+        }
+        if (sizes[first] < sizes[second]) {
+            std::swap(first, second);
+        }
+        parents[second] = first;
+        sizes[first] += sizes[second];
+    }
+};
+
+// 输入已由度数分类/并查集保证为单条开放链或简单闭环。
+// 排序时直接生成有向 edge use，不在输出后另做一轮拓扑复查。
+BoundaryLoop orderBoundaryChain(
+    const std::vector<std::size_t>& indices,
+    const std::vector<BoundaryEdgeUse>& boundaryEdges,
+    const TopTools_IndexedMapOfShape& vertices)
+{
+    std::map<int, std::vector<std::size_t>> incident;
+    for (const std::size_t index : indices) {
+        const BoundaryEdgeUse& edge = boundaryEdges[index];
+        incident[vertices.FindIndex(edge.firstVertex)].push_back(index);
+        incident[vertices.FindIndex(edge.lastVertex)].push_back(index);
+    }
+
+    int start = vertices.FindIndex(boundaryEdges[indices.front()].firstVertex);
+    for (const auto& entry : incident) {
+        assert(entry.second.size() == 1 || entry.second.size() == 2);
+        if (entry.second.size() == 1) {
+            start = entry.first;
+            break;
+        }
+    }
+
+    BoundaryLoop chain;
+    TopoDS_Vertex current = TopoDS::Vertex(vertices.FindKey(start));
+    chain.vertices.push_back(current);
+    std::size_t previous = boundaryEdges.size();
+    while (true) {
+        const auto& adjacent = incident.at(vertices.FindIndex(current));
+        std::size_t next = adjacent.front();
+        if (next == previous) {
+            if (adjacent.size() == 1) {
+                break;
+            }
+            next = adjacent.back();
+        }
+
+        const BoundaryEdgeUse& edge = boundaryEdges[next];
+        assert(edgeHasVertex(edge, current));
+        const TopoDS_Vertex finish = otherVertexOf(edge, current);
+        chain.edges.push_back(orientEdgeFromTo(edge.edge, current, finish));
+        chain.ownerFaces.push_back(edge.ownerFace);
+        chain.vertices.push_back(finish);
+        previous = next;
+        current = finish;
+        if (current.IsSame(chain.vertices.front())) {
+            break;
+        }
+    }
+    assert(chain.edges.size() == indices.size());
+    assert(chain.vertices.size() == chain.edges.size() + 1);
+    return chain;
+}
+
+std::vector<BoundaryLoop> extractBoundaryLoops(
+    const std::vector<BoundaryEdgeUse>& boundaryEdges)
 {
     std::vector<BoundaryLoop> loops;
+    if (boundaryEdges.empty()) {
+        return loops;
+    }
+
+    // IndexedMap 使用拓扑身份（包括 location，忽略 orientation），不合并近邻坐标。
+    TopTools_IndexedMapOfShape vertices;
+    for (const BoundaryEdgeUse& edge : boundaryEdges) {
+        vertices.Add(edge.firstVertex);
+        vertices.Add(edge.lastVertex);
+    }
+
+    std::vector<std::size_t> allIndices(boundaryEdges.size());
+    std::iota(allIndices.begin(), allIndices.end(), std::size_t{0});
+    std::vector<std::vector<std::size_t>> pending;
+    pending.push_back(std::move(allIndices));
+    std::set<std::vector<std::size_t>> emitted;
+    auto emitLoop = [&](std::vector<std::size_t> indices, BoundaryLoop loop) {
+        if (indices.size() < 3) {
+            return false;
+        }
+        std::sort(indices.begin(), indices.end());
+        if (emitted.insert(std::move(indices)).second) {
+            loops.push_back(std::move(loop));
+        }
+        return true;
+    };
+
+    while (!pending.empty()) {
+        std::vector<std::size_t> indices = std::move(pending.back());
+        pending.pop_back();
+
+        std::map<int, std::vector<std::size_t>> incident;
+        for (std::size_t local = 0; local < indices.size(); ++local) {
+            const BoundaryEdgeUse& edge = boundaryEdges[indices[local]];
+            incident[vertices.FindIndex(edge.firstVertex)].push_back(local);
+            incident[vertices.FindIndex(edge.lastVertex)].push_back(local);
+        }
+
+        auto groupEdges = [&](bool joinBranches) {
+            BoundaryEdgeSets sets(indices.size());
+            for (const auto& entry : incident) {
+                const auto& adjacent = entry.second;
+                if (joinBranches || adjacent.size() == 2) {
+                    for (std::size_t i = 1; i < adjacent.size(); ++i) {
+                        sets.unite(adjacent.front(), adjacent[i]);
+                    }
+                }
+            }
+            std::map<std::size_t, std::vector<std::size_t>> groups;
+            for (std::size_t local = 0; local < indices.size(); ++local) {
+                groups[sets.find(local)].push_back(indices[local]);
+            }
+            // 按原始最小边索引保持分量/链的确定性顺序。
+            std::vector<std::vector<std::size_t>> result;
+            for (auto& entry : groups) {
+                result.push_back(std::move(entry.second));
+            }
+            std::sort(result.begin(), result.end(),
+                [](const auto& first, const auto& second) {
+                    return first.front() < second.front();
+                });
+            return result;
+        };
+
+        // 必须在任何顺序遍历前分离连通分量；剩余边也重新走此步骤。
+        auto components = groupEdges(true);
+        if (components.size() > 1) {
+            for (auto it = components.rbegin(); it != components.rend(); ++it) {
+                pending.push_back(std::move(*it));
+            }
+            continue;
+        }
+
+        bool branched = false;
+        bool open = false;
+        for (const auto& entry : incident) {
+            branched = branched || entry.second.size() > 2;
+            open = open || entry.second.size() == 1;
+        }
+        if (!branched) {
+            if (!open) {
+                emitLoop(indices, orderBoundaryChain(indices, boundaryEdges, vertices));
+            }
+            continue;
+        }
+
+        // 只在度为 2 的顶点合并边：每组必为链，或回到同一分叉点的简单环。
+        const auto groups = groupEdges(false);
+        std::vector<BoundaryLoop> chains;
+        std::map<std::pair<int, int>, std::vector<std::size_t>> endpointPairs;
+        std::set<std::size_t> covered;
+        for (std::size_t group = 0; group < groups.size(); ++group) {
+            chains.push_back(orderBoundaryChain(groups[group], boundaryEdges, vertices));
+            const BoundaryLoop& chain = chains.back();
+            int first = vertices.FindIndex(chain.vertices.front());
+            int last = vertices.FindIndex(chain.vertices.back());
+            if (first == last) {
+                if (emitLoop(groups[group], chain)) {
+                    covered.insert(groups[group].begin(), groups[group].end());
+                }
+            }
+            else {
+                if (first > last) {
+                    std::swap(first, last);
+                }
+                endpointPairs[{first, last}].push_back(group);
+            }
+        }
+
+        // 本轮完整配对，不因先前组合覆盖了某条链而跳过其他链对。
+        for (const auto& entry : endpointPairs) {
+            const auto& matching = entry.second;
+            for (std::size_t i = 0; i < matching.size(); ++i) {
+                for (std::size_t j = i + 1; j < matching.size(); ++j) {
+                    const std::size_t a = matching[i], b = matching[j];
+                    if (groups[a].size() + groups[b].size() < 3) {
+                        continue;
+                    }
+                    BoundaryLoop loop = chains[a];
+                    const BoundaryLoop& second = chains[b];
+                    // 开放链均从拓扑索引较小的端点开始，第二条需反向追加。
+                    assert(loop.vertices.front().IsSame(second.vertices.front()));
+                    for (std::size_t k = second.edges.size(); k > 0; --k) {
+                        loop.edges.push_back(orientEdgeFromTo(
+                            second.edges[k - 1], second.vertices[k], second.vertices[k - 1]));
+                        loop.ownerFaces.push_back(second.ownerFaces[k - 1]);
+                        loop.vertices.push_back(second.vertices[k - 1]);
+                    }
+                    std::vector<std::size_t> loopIndices = groups[a];
+                    loopIndices.insert(loopIndices.end(), groups[b].begin(), groups[b].end());
+                    if (emitLoop(loopIndices, std::move(loop))) {
+                        covered.insert(loopIndices.begin(), loopIndices.end());
+                    }
+                }
+            }
+        }
+
+        // 分组由当前边集合唯一决定：没有移除边，下一轮分组也不会改变。
+        if (covered.empty()) {
+            continue;
+        }
+        std::vector<std::size_t> remaining;
+        for (const std::size_t index : indices) {
+            if (covered.find(index) == covered.end()) {
+                remaining.push_back(index);
+            }
+        }
+        if (!remaining.empty()) {
+            pending.push_back(std::move(remaining));
+        }
+    }
+    return loops;
+}
+
+std::vector<BoundaryLoop> buildBoundaryLoops(const TopoDS_Shape& shape)
+{
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
     TopologyUtils::BuildEdgeFaceMap(shape, edgeFaceMap);
 
@@ -307,66 +557,7 @@ std::vector<BoundaryLoop> buildBoundaryLoops(const TopoDS_Shape& shape)
         boundaryEdges.push_back(edgeUse);
     }
 
-    std::vector<bool> consumed(boundaryEdges.size(), false);
-    for (std::size_t startIndex = 0; startIndex < boundaryEdges.size(); ++startIndex) {
-        if (consumed[startIndex]) {
-            continue;
-        }
-
-        BoundaryLoop loop;
-        const TopoDS_Vertex loopStart = boundaryEdges[startIndex].firstVertex;
-        TopoDS_Vertex currentVertex = boundaryEdges[startIndex].lastVertex;
-        loop.vertices.push_back(loopStart);
-        loop.vertices.push_back(currentVertex);
-        loop.edges.push_back(orientEdgeFromTo(boundaryEdges[startIndex].edge, loopStart, currentVertex));
-        loop.ownerFaces.push_back(boundaryEdges[startIndex].ownerFace);
-        consumed[startIndex] = true;
-
-        bool closed = false;
-        bool failed = false;
-        while (!failed && loop.edges.size() <= boundaryEdges.size()) {
-            if (currentVertex.IsSame(loopStart)) {
-                closed = true;
-                break;
-            }
-
-            int nextIndex = -1;
-            for (std::size_t i = 0; i < boundaryEdges.size(); ++i) {
-                if (consumed[i] || !edgeHasVertex(boundaryEdges[i], currentVertex)) {
-                    continue;
-                }
-                if (nextIndex >= 0) {
-                    failed = true;
-                    break;
-                }
-                nextIndex = static_cast<int>(i);
-            }
-
-            if (failed || nextIndex < 0) {
-                failed = true;
-                break;
-            }
-
-            const BoundaryEdgeUse& nextUse = boundaryEdges[static_cast<std::size_t>(nextIndex)];
-            TopoDS_Vertex nextVertex = otherVertexOf(nextUse, currentVertex);
-            if (nextVertex.IsNull()) {
-                failed = true;
-                break;
-            }
-
-            loop.edges.push_back(orientEdgeFromTo(nextUse.edge, currentVertex, nextVertex));
-            loop.ownerFaces.push_back(nextUse.ownerFace);
-            loop.vertices.push_back(nextVertex);
-            consumed[static_cast<std::size_t>(nextIndex)] = true;
-            currentVertex = nextVertex;
-        }
-
-        if (closed && loop.edges.size() >= 4 && loop.vertices.size() == loop.edges.size() + 1) {
-            loops.push_back(loop);
-        }
-    }
-
-    return loops;
+    return extractBoundaryLoops(boundaryEdges);
 }
 } // namespace
 
@@ -641,7 +832,7 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
     const std::vector<BoundaryLoop> loops = buildBoundaryLoops(shape);
     for (const BoundaryLoop& loop : loops) {
         const int edgeCount = static_cast<int>(loop.edges.size());
-        if (edgeCount < 4) {
+        if (edgeCount < 3) {
             continue;
         }
 

@@ -1,4 +1,4 @@
-#include "SewShells.h"
+﻿#include "SewShells.h"
 #include "TopologyUtils.h"
 #include "RepairDiagnostics.h"
 
@@ -659,7 +659,8 @@ bool SewShells::sewCrossShellBoundaries(
     sewedShape.Nullify();
     const TopoDS_Shape original = makeShellGroupCompound(shellGroup);
     TopoDS_Shape current = original;
-    // 每个下标永久代表输入组中的同一子形状；提交后只更新其像，不重新判定归属。
+    // 每个下标始终对应同一个原始子形状；
+    // 每次缝合成功后，只更新其当前对应形状，不改变原始 Shell 归属。
     TopTools_IndexedMapOfShape sources;
     TopExp::MapShapes(original, sources);
     std::vector<TopoDS_Shape> images;
@@ -841,6 +842,21 @@ bool SewShells::sewCrossShellBoundaries(
                 TopExp::MapShapes(result, output);
                 for (int i = 1; reason.empty() && i <= output.Extent(); ++i) {
                     const double tolerance = subshapeTolerance(output(i));
+                    if (output(i).ShapeType() == TopAbs_FACE) {
+                        // 替换边会生成新面；通过历史映射使用对应输入面的容差。
+                        bool withinInputTolerance = false;
+                        for (std::size_t id = 0; id < trialImages.size(); ++id) {
+                            if (trialImages[id].IsNull() || !trialImages[id].IsSame(output(i)))
+                                continue;
+                            const double inputTolerance = subshapeTolerance(images[id]);
+                            withinInputTolerance = std::isfinite(inputTolerance)
+                                && std::isfinite(tolerance) && tolerance <= inputTolerance;
+                            break;
+                        }
+                        if (!withinInputTolerance)
+                            reason = "face tolerance exceeds input tolerance or source is missing";
+                        continue;
+                    }
                     const int source = trialShapes.FindIndex(output(i));
                     if (!std::isfinite(tolerance) || (tolerance > params_.maxTolerance
                         && (source == 0 || tolerance > tolerances[source - 1])))
@@ -1023,7 +1039,7 @@ bool SewShells::applyShapeFixAfterSewing(
         ShapeFix_Shape fixer(shape);
         const double precision = std::max(Precision::Confusion(), params_.sewingTolerance);
         fixer.SetPrecision(precision);
-        fixer.SetMaxTolerance(std::max({ precision, params_.maxTolerance, params_.sewingTolerance }));
+        fixer.SetMaxTolerance(std::max({ precision, params_.maxTolerance }));
         fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
         fixer.FixFaceTool()->FixMissingSeamMode() = 1;
         fixer.Perform();

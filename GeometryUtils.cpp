@@ -1,6 +1,7 @@
-#include "GeometryUtils.h"
+﻿#include "GeometryUtils.h"
 
 #include <BRep_Tool.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_CheckCurveOnSurface.hxx>
@@ -10,6 +11,9 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <Extrema_ExtPC.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2dAPI_Interpolate.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <gp_Vec.hxx>
@@ -23,15 +27,186 @@
 #include <Standard_Failure.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TColgp_HArray1OfPnt2d.hxx>
+#include <TColStd_HArray1OfReal.hxx>
 
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <sstream>
+#include <map>
+#include <iterator>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+namespace {
+// 仅在常规修复失败后使用；所有试算均在独立 TShape 上完成。
+bool rebuildPCurveByProjection(TopoDS_Edge& edge,
+                               const TopoDS_Face& face,
+                               double tolerance,
+                               std::string& error)
+{
+    try {
+        if (BRep_Tool::Degenerated(edge) || BRep_Tool::IsClosed(edge, face)) {
+            error = "sampled pcurve rebuild does not support degenerate or seam edges";
+            return false;
+        }
+        // 此回退只重建当前 face 的表示，不为其他 face 的 pcurve 宣称同参数成立。
+        if (!BRep_Tool::SameParameter(edge) || !BRep_Tool::SameRange(edge)) {
+            error = "sampled pcurve rebuild requires synchronized edge parameters";
+            return false;
+        }
+        Standard_Real first = 0.0, last = 0.0;
+        // 两个不带 location 输出参数的接口均返回世界坐标系中的几何。
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (curve.IsNull() || surface.IsNull() ||
+            !std::isfinite(first) || !std::isfinite(last) ||
+            last - first <= Precision::PConfusion()) {
+            error = "sampled pcurve rebuild has invalid geometry or parameter range";
+            return false;
+        }
+        // 周期接缝和闭曲面的 UV 分支需要专门展开，不在此回退中猜测。
+        if (surface->IsUClosed() || surface->IsVClosed() ||
+            surface->IsUPeriodic() || surface->IsVPeriodic()) {
+            error = "sampled pcurve rebuild does not support closed or periodic surfaces";
+            return false;
+        }
+
+        constexpr int initialIntervals = 128;
+        constexpr std::size_t maxSamples = 2049;
+        constexpr int maxIterations = 16;
+        const double parameterEpsilon = std::max(
+            Precision::PConfusion(), (last - first) * 1.0e-12);
+        const double projectionPrecision = Precision::Confusion();
+        double uFirst, uLast, vFirst, vLast;
+        surface->Bounds(uFirst, uLast, vFirst, vLast);
+        GeomAPI_ProjectPointOnSurf projector;
+        projector.Init(surface, uFirst, uLast, vFirst, vLast, projectionPrecision);
+        std::map<double, gp_Pnt2d> samples;
+        double maxProjectionDistance = 0.0;
+        auto addSample = [&](double parameter) {
+            auto next = samples.lower_bound(parameter);
+            if ((next != samples.end() && next->first - parameter <= parameterEpsilon) ||
+                (next != samples.begin() && parameter - std::prev(next)->first <= parameterEpsilon)) {
+                return true;
+            }
+            if (samples.size() >= maxSamples) {
+                error = "sampled pcurve rebuild reached sample limit";
+                return false;
+            }
+            const gp_Pnt point = curve->Value(parameter);
+            projector.Perform(point);
+            if (!projector.IsDone() || projector.NbPoints() == 0) {
+                error = "sampled pcurve rebuild could not project a curve point";
+                return false;
+            }
+            Standard_Real u, v;
+            projector.LowerDistanceParameters(u, v);
+            const double distance = point.Distance(surface->Value(u, v));
+            if (!std::isfinite(u) || !std::isfinite(v) || !std::isfinite(distance) ||
+                distance > tolerance) {
+                error = "sampled pcurve rebuild exceeds curve-to-surface tolerance";
+                return false;
+            }
+            maxProjectionDistance = std::max(maxProjectionDistance, distance);
+            samples.emplace_hint(next, parameter, gp_Pnt2d(u, v));
+            return true;
+        };
+        for (int i = 0; i <= initialIntervals; ++i) {
+            if (!addSample(i == initialIntervals ? last :
+                    first + (last - first) * i / initialIntervals)) {
+                return false;
+            }
+        }
+
+        // EmptyCopied 克隆 edge 的曲线表示及其范围，不复制/修改原曲线几何。
+        TopoDS_Edge probe = TopoDS::Edge(edge.EmptyCopied());
+        probe.Orientation(TopAbs_FORWARD);
+        BRep_Builder builder;
+        double maxDeviation = 0.0;
+        for (int iteration = 0; iteration < maxIterations; ++iteration) {
+            const int count = static_cast<int>(samples.size());
+            Handle(TColgp_HArray1OfPnt2d) points = new TColgp_HArray1OfPnt2d(1, count);
+            Handle(TColStd_HArray1OfReal) parameters = new TColStd_HArray1OfReal(1, count);
+            int index = 1;
+            for (const auto& sample : samples) {
+                points->SetValue(index, sample.second);
+                parameters->SetValue(index++, sample.first);
+            }
+            Geom2dAPI_Interpolate interpolator(points, parameters, Standard_False,
+                Precision::PConfusion());
+            interpolator.Perform();
+            if (!interpolator.IsDone()) {
+                error = "sampled pcurve interpolation failed";
+                return false;
+            }
+            const Handle(Geom2d_Curve) pcurve = interpolator.Curve();
+            builder.UpdateEdge(probe, pcurve, face, 0.0);
+            builder.Range(probe, face, first, last);
+            BRepLib_CheckCurveOnSurface checker(probe, face);
+            checker.Perform();
+            if (!checker.IsDone() || !std::isfinite(checker.MaxDistance())) {
+                error = "sampled pcurve rebuild failed deviation check";
+                return false;
+            }
+            maxDeviation = checker.MaxDistance();
+            // 在既有验收预算内，再限制插值引入的额外偏差；不直接花完宽松容差。
+            const double fitTolerance = std::min(tolerance,
+                maxProjectionDistance + std::max(Precision::Confusion(), tolerance * 0.05));
+            if (maxDeviation <= fitTolerance) {
+                if (!GeometryUtils::HasValidPCurveOnFace(probe, face, tolerance, &error)) {
+                    return false;
+                }
+                const double measuredTolerance = std::min(tolerance,
+                    std::max(Precision::Confusion(), maxDeviation * (1.0 + 1.0e-6)));
+                // 只提交当前 face 的 pcurve，保留 canonical edge、3D 曲线和其他表示。
+                builder.UpdateEdge(edge, pcurve, face, measuredTolerance);
+                builder.Range(edge, face, first, last);
+                ShapeFix_Edge().FixVertexTolerance(edge, face);
+                return true;
+            }
+
+            std::vector<double> additional;
+            for (auto it = samples.begin(), next = std::next(it); next != samples.end(); ++it, ++next) {
+                for (int part = 1; part < 4; ++part) {
+                    const double t = it->first + (next->first - it->first) * part / 4.0;
+                    const gp_Pnt2d uv = pcurve->Value(t);
+                    const double distance = curve->Value(t).Distance(surface->Value(uv.X(), uv.Y()));
+                    if (!std::isfinite(distance) || distance > fitTolerance) {
+                        additional.push_back(t);
+                    }
+                }
+            }
+            const double worstParameter = checker.MaxParameter();
+            if (std::isfinite(worstParameter) && worstParameter > first && worstParameter < last) {
+                additional.push_back(worstParameter);
+            }
+            const std::size_t previousSize = samples.size();
+            std::sort(additional.begin(), additional.end());
+            for (double t : additional) {
+                if (!addSample(t)) {
+                    return false;
+                }
+            }
+            if (samples.size() == previousSize) {
+                break;
+            }
+        }
+        std::ostringstream message;
+        message << "sampled pcurve rebuild did not converge: maxDeviation=" << maxDeviation
+                << ", tolerance=" << tolerance << ", samples=" << samples.size();
+        error = message.str();
+    }
+    catch (const Standard_Failure& failure) {
+        error = "OCCT failure during sampled pcurve rebuild: ";
+        error += failure.GetMessageString() ? failure.GetMessageString() : "OCCT failure";
+    }
+    return false;
+}
+} // namespace
 
 double GeometryUtils::ComputeEdgeLength(const TopoDS_Edge& edge)
 {
@@ -269,6 +444,12 @@ bool GeometryUtils::RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
         return false;
     }
 
+    if (!std::isfinite(tolerance)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "pcurve repair tolerance is not finite";
+        }
+        return false;
+    }
     const double safeTolerance = std::max(tolerance, Precision::Confusion());
 
     std::string validationError;
@@ -276,6 +457,7 @@ bool GeometryUtils::RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
         return true;
     }
 
+    std::string repairError;
     try {
         ShapeFix_Edge edgeFix;
         const Standard_Boolean isSeam = BRep_Tool::IsClosed(edge, face);
@@ -283,28 +465,29 @@ bool GeometryUtils::RepairPCurveForEdgeOnFace(TopoDS_Edge& edge,
         edgeFix.FixReversed2d(edge, face);
         edgeFix.FixSameParameter(edge, face, safeTolerance);
         edgeFix.FixVertexTolerance(edge, face);
-
-        // SameParameter acts on the edge and may affect this edge's pcurves on other faces.
-        BRepLib::SameParameter(edge, safeTolerance);
+        validationError.clear();
+        if (HasValidPCurveOnFace(edge, face, safeTolerance, &validationError)) {
+            return true;
+        }
+        repairError = "pcurve repair failed validation: " + validationError;
     }
     catch (Standard_Failure& failure) {
-        if (errorMessage != nullptr) {
-            const Standard_CString message = failure.GetMessageString();
-            *errorMessage = "OCCT failure while repairing pcurve: ";
-            *errorMessage += message != nullptr ? message : "OCCT failure";
-        }
-        return false;
+        const Standard_CString message = failure.GetMessageString();
+        repairError = "OCCT failure while repairing pcurve: ";
+        repairError += message != nullptr ? message : "OCCT failure";
     }
 
-    validationError.clear();
-    if (!HasValidPCurveOnFace(edge, face, safeTolerance, &validationError)) {
+    std::string rebuildError;
+    if (rebuildPCurveByProjection(edge, face, safeTolerance, rebuildError)) {
         if (errorMessage != nullptr) {
-            *errorMessage = "pcurve repair failed validation: " + validationError;
+            errorMessage->clear();
         }
-        return false;
+        return true;
     }
-
-    return true;
+    if (errorMessage != nullptr) {
+        *errorMessage = repairError + "; " + rebuildError;
+    }
+    return false;
 }
 
 bool GeometryUtils::RepairPCurvesForEdge(TopoDS_Edge& edge,

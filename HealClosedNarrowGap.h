@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstddef>
 #include <limits>
@@ -28,7 +28,7 @@ public:
 
     struct Params {
         // 两侧 chain 采样点之间允许的最大宽度。
-        double maxGapWidth = 1.0e-1;
+        double maxGapWidth = 0.1;
         // 候选两侧 chain 长度相似度下限：min(lengthA, lengthB) / max(lengthA, lengthB)。
         double minLengthRatio = 0.6;
         // 候选细缝的最小长宽比；值越大越偏向狭长细缝。
@@ -87,7 +87,7 @@ public:
         // 中线收缩失败时，是否回退到“一侧 chain 替换另一侧 chain”的保守方案。
         bool fallbackToSideReplacement = true;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
-        double midlineRepairTolerance = 1.0e-1;
+        double midlineRepairTolerance = 0.1;
         // 为 true 时优先保留总长度较长的 chain；否则优先保留 edge 数更少的 chain。
         bool preferLongerChainToKeep = true;
         // 为 true 时，替换后运行 ShapeFix_Shape 做整体后处理。
