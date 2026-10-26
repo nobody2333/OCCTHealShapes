@@ -16,8 +16,8 @@
 #include <TopoDS_Solid.hxx>
 
 #include "MergeShortEdge.h"
-#include "HealNarrowGap.h"
-#include "HealClosedNarrowGap.h"
+#include "HealNarrowGap/HealNarrowGap.h"
+#include "HealClosedNarrowGap/HealClosedNarrowGap.h"
 #include "ShapePreProcess.h"
 #include "ShapeRepairPipeline.h"
 #include "SewShells.h"

@@ -74,6 +74,11 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LibraryPath>$(LibraryPath)</LibraryPath>
   </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -146,13 +151,24 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ApplicationInit.cpp" />
-    <ClCompile Include="HealClosedNarrowGap.cpp" />
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGap.cpp" />
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapDetection.cpp" />
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapMidline.cpp" />
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapFilling.cpp" />
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapFaceRebuild.cpp" />
     <ClCompile Include="main.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="GeometryUtils.cpp" />
-    <ClCompile Include="HealNarrowGap.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGap.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapDetection.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapReplaceOneSide.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapCrossedFace.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapCrossedFaceBoundary.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapFaceRebuild.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapSurfaceIntersection.cpp" />
+    <ClCompile Include="HealNarrowGap\HealNarrowGapMidline.cpp" />
     <ClCompile Include="HealSimpleHole.cpp" />
     <ClCompile Include="Logger.cpp" />
     <ClCompile Include="ShapePreProcess.cpp" />
@@ -175,8 +191,8 @@
   <ItemGroup>
     <ClInclude Include="ApplicationInit.h" />
     <ClInclude Include="GeometryUtils.h" />
-    <ClInclude Include="HealClosedNarrowGap.h" />
-    <ClInclude Include="HealNarrowGap.h" />
+    <ClInclude Include="HealClosedNarrowGap\HealClosedNarrowGap.h" />
+    <ClInclude Include="HealNarrowGap\HealNarrowGap.h" />
     <ClInclude Include="HealSimpleHole.h" />
     <ClInclude Include="Logger.h" />
     <ClInclude Include="ShapePreProcess.h" />

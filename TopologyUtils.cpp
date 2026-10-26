@@ -116,3 +116,48 @@ void TopologyUtils::RemoveDuplicateAncestors(TopTools_IndexedDataMapOfShapeListO
         originalShapes = uniqueShapes;
     }
 }
+
+bool TopologyUtils::GetEdgeVertices(const TopoDS_Edge& edge, TopoDS_Vertex& first, TopoDS_Vertex& last)
+{
+    first.Nullify();
+    last.Nullify();
+    if (edge.IsNull()) {
+        return false;
+    }
+
+    TopExp::Vertices(edge, first, last, Standard_True);
+    return !first.IsNull() && !last.IsNull();
+}
+
+TopoDS_Edge TopologyUtils::OrientEdgeFromTo(const TopoDS_Edge& edge, const TopoDS_Vertex& from, const TopoDS_Vertex& to)
+{
+    TopoDS_Edge oriented = edge;
+    if (edge.IsNull() || from.IsNull() || to.IsNull()) {
+        return oriented;
+    }
+
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    if (!TopologyUtils::GetEdgeVertices(oriented, first, last)) {
+        return oriented;
+    }
+
+    if (first.IsSame(from) && last.IsSame(to)) {
+        return oriented;
+    }
+
+    if (first.IsSame(to) && last.IsSame(from)) {
+        oriented.Reverse();
+    }
+    return oriented;
+}
+
+bool TopologyUtils::IsSameFaceInVector(const std::vector<TopoDS_Face>& faces, const TopoDS_Face& face)
+{
+    for (const TopoDS_Face& existingFace : faces) {
+        if (existingFace.IsSame(face)) {
+            return true;
+        }
+    }
+    return false;
+}

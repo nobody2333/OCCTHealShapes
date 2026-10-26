@@ -1,7 +1,7 @@
 #pragma once
 
-#include "HealClosedNarrowGap.h"
-#include "HealNarrowGap.h"
+#include "HealClosedNarrowGap/HealClosedNarrowGap.h"
+#include "HealNarrowGap/HealNarrowGap.h"
 #include "HealSimpleHole.h"
 #include "ShapeRepairPipeline.h"
 #include "SewShells.h"

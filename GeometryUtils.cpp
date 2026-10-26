@@ -520,3 +520,15 @@ bool GeometryUtils::RepairPCurvesForEdge(TopoDS_Edge& edge,
 
     return allFacesValid;
 }
+
+double GeometryUtils::Clamp01(double value)
+{
+    return std::max(0.0, std::min(1.0, value));
+}
+
+bool GeometryUtils::IsFinitePoint(const gp_Pnt& point)
+{
+    return std::isfinite(point.X())
+        && std::isfinite(point.Y())
+        && std::isfinite(point.Z());
+}

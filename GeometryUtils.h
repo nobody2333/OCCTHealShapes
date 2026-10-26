@@ -5,11 +5,17 @@
 #include <TopoDS_Shape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Pnt.hxx>
 #include <string>
 #include <vector>
 
 class GeometryUtils {
 public:
+	// 将归一化参数限制到 [0, 1]；不作为有限值有效性检查。
+	static double Clamp01(double value);
+	// 点的三个坐标均为有限值时返回 true。
+	static bool IsFinitePoint(const gp_Pnt& point);
+
 	static double ComputeEdgeLength(const TopoDS_Edge& edge);
 	/// <summary>
 	/// 计算两条边在公共顶点处的切线夹角（弧度）

@@ -1,4 +1,5 @@
 #include "RepairDiagnostics.h"
+#include "TopologyUtils.h"
 
 #include <algorithm>
 #include <map>
@@ -30,12 +31,6 @@ bool statusesAreSubset(
         }
     }
     return true;
-}
-
-std::string failureText(const Standard_Failure& failure)
-{
-    const Standard_CString message = failure.GetMessageString();
-    return message != nullptr ? std::string(message) : std::string("OCCT failure");
 }
 
 std::string replaceAll(
@@ -147,7 +142,7 @@ RepairDiagnostics::FailureList RepairDiagnostics::CollectBRepCheckFailures(
     }
     catch (Standard_Failure& failure) {
         if (errorMessage != nullptr) {
-            *errorMessage = "BRepCheck failure collection failed: " + failureText(failure);
+            *errorMessage = "BRepCheck failure collection failed: " + FailureText(failure);
         }
     }
 
@@ -369,4 +364,34 @@ void RepairDiagnostics::AppendShapeCheckSummary(
     messages.push_back(
         shapeLabel + " has existing BRepCheck failures:"
         + DescribeBRepCheckFailures(failures));
+}
+
+std::string RepairDiagnostics::FailureText(const Standard_Failure& failure)
+{
+    const Standard_CString message = failure.GetMessageString();
+    return message != nullptr ? std::string(message) : std::string("OCCT failure");
+}
+
+std::string RepairDiagnostics::DescribeEdgeFaceCounts(
+    const TopoDS_Shape& shape,
+    const std::vector<TopoDS_Edge>& edges)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+    TopologyUtils::BuildEdgeFaceMap(shape, edgeFaceMap);
+
+    std::ostringstream os;
+    os << "edgeCount=" << edges.size() << ", adjacentFaceCounts=[";
+    for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
+        if (edgeIndex > 0) {
+            os << ", ";
+        }
+
+        int faceCount = 0;
+        if (!edges[edgeIndex].IsNull() && edgeFaceMap.Contains(edges[edgeIndex])) {
+            faceCount = edgeFaceMap.FindFromKey(edges[edgeIndex]).Extent();
+        }
+        os << edgeIndex << ":" << faceCount;
+    }
+    os << "]";
+    return os.str();
 }

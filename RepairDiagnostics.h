@@ -6,13 +6,22 @@
 #include <BRepCheck_Status.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Edge.hxx>
 
 class BRepCheck_Analyzer;
+class Standard_Failure;
 
 // 统一封装修复算法使用的 BRepCheck 差异分析和结构化日志格式。
 class RepairDiagnostics
 {
 public:
+    // 返回 OCCT 异常文字；异常未提供文字时返回 "OCCT failure"。
+    static std::string FailureText(const Standard_Failure& failure);
+
+    // 输出指定边的唯一邻接 face 数量；空边或不在 shape 中的边记为 0。
+    static std::string DescribeEdgeFaceCounts(
+        const TopoDS_Shape& shape, const std::vector<TopoDS_Edge>& edges);
+
     struct BRepCheckFailureInfo
     {
         // 发生错误的拓扑子形状，用于比较修复前后是否为同一对象。

@@ -16,6 +16,12 @@
     <Filter Include="main文件">
       <UniqueIdentifier>{ed12dc38-120d-43d2-9e93-214b51569192}</UniqueIdentifier>
     </Filter>
+    <Filter Include="HealNarrowGap">
+      <UniqueIdentifier>{997DB09B-0561-4F05-A345-BBFC22408E4B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="HealClosedNarrowGap">
+      <UniqueIdentifier>{D11BE758-4E21-4150-9F00-C52A736A35F1}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Viewer.cpp">
@@ -45,8 +51,29 @@
     <ClCompile Include="GeometryUtils.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="HealNarrowGap.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="HealNarrowGap\HealNarrowGap.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapDetection.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapReplaceOneSide.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapCrossedFace.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapCrossedFaceBoundary.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapFaceRebuild.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapSurfaceIntersection.cpp">
+      <Filter>HealNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealNarrowGap\HealNarrowGapMidline.cpp">
+      <Filter>HealNarrowGap</Filter>
     </ClCompile>
     <ClCompile Include="HealSimpleHole.cpp">
       <Filter>源文件</Filter>
@@ -57,8 +84,20 @@
     <ClCompile Include="SewShells.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="HealClosedNarrowGap.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGap.cpp">
+      <Filter>HealClosedNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapDetection.cpp">
+      <Filter>HealClosedNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapMidline.cpp">
+      <Filter>HealClosedNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapFilling.cpp">
+      <Filter>HealClosedNarrowGap</Filter>
+    </ClCompile>
+    <ClCompile Include="HealClosedNarrowGap\HealClosedNarrowGapFaceRebuild.cpp">
+      <Filter>HealClosedNarrowGap</Filter>
     </ClCompile>
     <ClCompile Include="RepairDiagnostics.cpp">
       <Filter>源文件</Filter>
@@ -95,8 +134,8 @@
     <ClInclude Include="TopologyUtils.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="HealNarrowGap.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="HealNarrowGap\HealNarrowGap.h">
+      <Filter>HealNarrowGap</Filter>
     </ClInclude>
     <ClInclude Include="HealSimpleHole.h">
       <Filter>头文件</Filter>
@@ -107,8 +146,8 @@
     <ClInclude Include="SewShells.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="HealClosedNarrowGap.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="HealClosedNarrowGap\HealClosedNarrowGap.h">
+      <Filter>HealClosedNarrowGap</Filter>
     </ClInclude>
     <ClInclude Include="RepairDiagnostics.h">
       <Filter>头文件</Filter>

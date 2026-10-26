@@ -2,12 +2,27 @@
 
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
+#include <vector>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 
 class TopologyUtils {
 public:
+    // 获取考虑 edge orientation 的起止顶点；先清空输出，缺少任一端点时返回 false。
+    static bool GetEdgeVertices(
+        const TopoDS_Edge& edge, TopoDS_Vertex& first, TopoDS_Vertex& last);
+
+    // 按拓扑端点调整 edge use 方向，不修改底层 TShape。
+    // 输入为空、缺少端点或端点不匹配时原样返回，不表示定向成功。
+    static TopoDS_Edge OrientEdgeFromTo(
+        const TopoDS_Edge& edge, const TopoDS_Vertex& from, const TopoDS_Vertex& to);
+
+    // 使用 IsSame 比较 TShape 和 location，忽略 orientation，不按几何位置合并。
+    static bool IsSameFaceInVector(
+        const std::vector<TopoDS_Face>& faces, const TopoDS_Face& face);
+
     /// <summary>
     /// 构建 vertex -> adjacent edges 映射，并去除重复 edge。
     /// </summary>

@@ -10,6 +10,8 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 
 // 专门处理“同端点双边细缝”的局部细缝修复。
@@ -108,6 +110,21 @@ public:
     int perform(const TopoDS_Shape& inputShape);
 
 private:
+    // 仅供本模块各实现文件共用，不改变修复器的公共接口。
+    static const char* repairStrategyName(RepairStrategy strategy);
+    static bool findFacesForSameEdge(
+        const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
+        const TopoDS_Edge& edge,
+        TopTools_ListOfShape& faces);
+    static bool containsSameEdge(
+        const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& target);
+    // 获取累计 face orientation 后的唯一 edge-use 方向。
+    static bool findUniqueEdgeUseOrientation(
+        const TopoDS_Face& face,
+        const TopoDS_Edge& edge,
+        TopAbs_Orientation& orientation,
+        std::string& errorMessage);
+
     // 原支撑面修复的结构化结果；NeedsSurfaceRebuild 当前只记录并拒绝。
     enum class OriginalSurfaceRepairStatus {
         Success,
