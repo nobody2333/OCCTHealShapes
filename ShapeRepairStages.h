@@ -26,6 +26,11 @@ namespace ShapeRepairStages
         const HealClosedNarrowGap::Params& params = HealClosedNarrowGap::Params(),
         bool enabled = true);
 
+    ShapeRepairPipeline::Stage MakeMergeShortEdgeStage(
+        double bboxRatio = 0.001,
+        double angleThresholdDeg = 160.0,
+        bool enabled = true);
+
     ShapeRepairPipeline::Stage MakeHealSimpleHoleStage(
         const HealSimpleHole::Params& params = HealSimpleHole::Params(),
         bool enabled = true);

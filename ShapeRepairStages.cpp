@@ -1,4 +1,5 @@
 #include "ShapeRepairStages.h"
+#include "MergeShortEdge.h"
 
 ShapeRepairPipeline::Stage ShapeRepairStages::MakeShapePreProcessStage(
     const ShapePreProcess::Params& params, bool enabled)
@@ -69,6 +70,27 @@ ShapeRepairPipeline::Stage ShapeRepairStages::MakeHealClosedNarrowGapStage(
         result.resultShape = healer.getResultShape();
         result.modified = healer.isModified();
         result.messages = healer.getMessages();
+        return result;
+    };
+    return stage;
+}
+
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeMergeShortEdgeStage(
+    double bboxRatio,
+    double angleThresholdDeg,
+    bool enabled)
+{
+    ShapeRepairPipeline::Stage stage;
+    stage.name = "MergeShortEdge";
+    stage.enabled = enabled;
+    stage.execute = [bboxRatio, angleThresholdDeg](const TopoDS_Shape& inputShape) {
+        MergeShortEdge merger(bboxRatio, angleThresholdDeg);
+        merger.setInputShape(inputShape);
+        ShapeRepairPipeline::StageExecutionResult result;
+        result.repairCount = merger.performMerge();
+        result.modified = result.repairCount > 0;
+        result.resultShape = result.modified ? merger.getResultShape() : inputShape;
+        result.messages = merger.getMessages();
         return result;
     };
     return stage;

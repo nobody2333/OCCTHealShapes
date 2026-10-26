@@ -476,6 +476,7 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     // 闭合细缝修复可能整理出 crossed-face 重建所需的干净边界，完成后再复扫一次。
     const bool enableHealNarrowGapPostClosedPass =
         enableHealNarrowGap && enableHealClosedNarrowGap;
+    const bool enableMergeShortEdge = true;
     // 自动补孔需要结合模型单位设置尺寸范围；当前已启用。
     const bool enableHealSimpleHole = false;
 
@@ -488,6 +489,8 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
     HealNarrowGap::Params narrowGapParams;
     HealClosedNarrowGap::Params closedNarrowGapParams;
     HealSimpleHole::Params simpleHoleParams;
+    const double mergeShortEdgeBboxRatio = 0.001;
+    const double mergeShortEdgeAngleThresholdDeg = 160.0;
 
     // 当前启用 HealNarrowGap 的 crossed-face 后置原支撑面重建策略。
     narrowGapParams.enableCrossedFaceBoundaryRepair = true;
@@ -514,6 +517,11 @@ int runShapeRepairPipeline(const std::string& inputFilePath) {
             enableHealNarrowGapPostClosedPass);
     narrowGapPostClosedStage.name = "HealNarrowGapPostClosedPass";
     pipeline.addStage(narrowGapPostClosedStage);
+    // 每个容器先合并短边，再由 grouped 入口统一执行 SewShells。
+    pipeline.addStage(ShapeRepairStages::MakeMergeShortEdgeStage(
+        mergeShortEdgeBboxRatio,
+        mergeShortEdgeAngleThresholdDeg,
+        enableMergeShortEdge));
 
     std::cout << "Running configured shape repair pipeline......" << std::endl;
     const int repairedCount = appInit.runGroupedRepairPipelineAndExport(
@@ -544,7 +552,7 @@ int main()
     if (localtime_s(&localTime, &currentTime) == 0) {
         std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
     }
-    std::string fileName = "./assets/h6k_cf.stp";
+    std::string fileName = "./assets/h6k_cpl.stp";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);
