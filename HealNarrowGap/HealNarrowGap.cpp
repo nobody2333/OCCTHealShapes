@@ -1,4 +1,4 @@
-#include "HealNarrowGap.h"
+﻿#include "HealNarrowGap.h"
 #include "GeometryUtils.h"
 #include "RepairDiagnostics.h"
 #include "TopologyUtils.h"
@@ -436,7 +436,7 @@ int HealNarrowGap::perform()
                 }
 
                 std::ostringstream warning;
-                warning << "Warning: repaired by CrossedFaceBoundary only after all regular "
+                warning << "Info: repaired by CrossedFaceBoundary only after all regular "
                         << "candidates failed:"
                         << "\n" << RepairDiagnostics::IndentMultiline(
                             regularFailureReason,
@@ -483,6 +483,7 @@ bool HealNarrowGap::tryRepairCandidate(
     std::string& errorMessage)
 {
     repairedShape.Nullify();
+    errorMessage.clear();
     if (currentShape.IsNull()) {
         errorMessage = "Current shape is null";
         return false;
@@ -525,6 +526,21 @@ bool HealNarrowGap::tryRepairCandidate(
 
     // Auto 在这里只运行原有常规策略。CrossedFaceBoundary 由 perform() 在
     // 本轮所有常规候选都无法提交后，从普通跳过列表执行后置筛选。
+    // 每次失败立即记录，避免后续候选成功时丢失原因；全部失败时仍返回完整汇总。
+    std::string autoFailures;
+    const auto recordStrategyFailure = [this, &autoFailures](
+        const char* strategyName,
+        const std::string& reason) {
+        const std::string failureBlock =
+            RepairDiagnostics::StrategyFailureBlock(strategyName, reason);
+        appendMessage(messages_, "Repair strategy failed:\n"
+            + RepairDiagnostics::IndentMultiline(failureBlock, "  "));
+        if (!autoFailures.empty()) {
+            autoFailures += '\n';
+        }
+        autoFailures += failureBlock;
+    };
+
     std::string sideError;
     if (sideGapAllowed) {
         if (tryRepairByReplacingOneSide(
@@ -533,7 +549,11 @@ bool HealNarrowGap::tryRepairCandidate(
                 candidate,
                 repairedShape,
                 sideError)) {
+            appendMessage(messages_, "Info: repaired by one-side replacement");
             return true;
+        }
+        else {
+            recordStrategyFailure("ReplaceOneSide", sideError);
         }
     }
     else {
@@ -542,6 +562,7 @@ bool HealNarrowGap::tryRepairCandidate(
            << ", replaceOneSideMaxGap=" << myParams.replaceOneSideMaxGap
            << ", candidateMaxGap=" << myParams.candidateMaxGap;
         sideError = os.str();
+        recordStrategyFailure("ReplaceOneSide", sideError);
     }
 
     std::string midlineError;
@@ -552,17 +573,14 @@ bool HealNarrowGap::tryRepairCandidate(
                 candidate,
                 repairedShape,
                 midlineError)) {
-            if (!sideError.empty()) {
-                std::ostringstream warning;
-                warning << "Warning: repaired by midline collapse after one-side replacement failed:"
-                        << "\n" << RepairDiagnostics::IndentMultiline(
-                            RepairDiagnostics::StrategyFailureBlock(
-                                "ReplaceOneSide",
-                                sideError),
-                            "  ");
-                appendMessage(messages_, warning.str());
-            }
+            std::ostringstream info;
+            info << "Info: repaired by midline collapse after one-side replacement failed:"
+                 << "\n" << RepairDiagnostics::IndentMultiline(autoFailures, "  ");
+            appendMessage(messages_, info.str());
             return true;
+        }
+        else {
+            recordStrategyFailure("MidlineCollapse", midlineError);
         }
     }
     else {
@@ -570,27 +588,15 @@ bool HealNarrowGap::tryRepairCandidate(
         message << "midline gap too large: maxGap=" << candidate.maxGap
                 << ", midlineMaxGap=" << myParams.midlineMaxGap;
         midlineError = message.str();
+        recordStrategyFailure("MidlineCollapse", midlineError);
     }
 
-    {
-        std::ostringstream message;
-        message << "Auto repair failed:"
-                << "\n" << RepairDiagnostics::IndentMultiline(
-                    RepairDiagnostics::StrategyFailureBlock(
-                        "ReplaceOneSide",
-                        sideError),
-                    "  ")
-                << "\n" << RepairDiagnostics::IndentMultiline(
-                    RepairDiagnostics::StrategyFailureBlock(
-                        "MidlineCollapse",
-                        midlineError),
-                    "  ");
-        errorMessage = message.str();
-    }
+    errorMessage = "Auto repair failed:\n"
+        + RepairDiagnostics::IndentMultiline(autoFailures, "  ");
     return false;
 }
 
-// 尝试提交单个候选修复；任何校验失败都会返回 false，由调用方回滚并尝试下一候选。
+// 将一条日志追加到消息列表。
 void HealNarrowGap::appendMessage(std::vector<std::string>& messages, const std::string& message) const
 {
     messages.push_back(message);

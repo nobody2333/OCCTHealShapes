@@ -27,6 +27,9 @@
 #include <TopTools_ListOfShape.hxx>
 
 namespace {
+constexpr double kMaxEndEdgeLengthFactor = 2.0;
+constexpr double kMinAdjacentEdgeLengthRatio = 3.0;
+
 TopoDS_Face firstFaceInList(const TopTools_ListOfShape& shapes)
 {
     for (TopTools_ListIteratorOfListOfShape it(shapes); it.More(); it.Next()) {
@@ -662,13 +665,9 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
             continue;
         }
 
-        if (!params_.detectShortEdgeEnds) {
-            continue;
-        }
-
         // 非尖点端部必须是有效短 edge，且它两侧相邻 edge 都明显更长。
         const double maxEndEdgeLength =
-            params_.maxGapWidth * params_.maxEndEdgeLengthFactor;
+            params_.maxGapWidth * kMaxEndEdgeLengthFactor;
         std::vector<int> shortEndEdgeIndices;
         std::vector<double> shortEndScores(
             static_cast<std::size_t>(edgeCount), 0.0);
@@ -683,7 +682,7 @@ std::vector<HealClosedNarrowGap::ClosedGapCandidate> HealClosedNarrowGap::extrac
                 edgeLengths[static_cast<std::size_t>(nextIndex)]);
             if (edgeLength > maxEndEdgeLength ||
                 shorterAdjacentLength + Precision::Confusion() <
-                    edgeLength * params_.minAdjacentEdgeLengthRatio) {
+                    edgeLength * kMinAdjacentEdgeLengthRatio) {
                 continue;
             }
 

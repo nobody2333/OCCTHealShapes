@@ -32,28 +32,28 @@ public:
         // 是否在 Auto 的常规策略全部停止后扫描 crossed-face 候选。
         bool enableCrossedFaceBoundaryRepair = true;
         // 候选搜索阈值：用于判断两条 edge 的双向投影距离是否足够近。
-        double candidateMaxGap = 1.2;
+        double candidateMaxGap = 1;
         // ReplaceOneSide 允许尝试单边替换的最大候选边间距离。
-        double replaceOneSideMaxGap = 1.2;
+        double replaceOneSideMaxGap = 0.1;
         // SurfaceIntersection 允许处理的最大边间距离。
         double surfaceIntersectionMaxGap = 1.0e-1;
         // SurfaceIntersection 的求交容差；crossed-face 后置修复不使用此参数。
         double surfaceIntersectionFuzzyTol = 1.0e-1;
         // 中线塌缩允许处理的最大边间距离；不参与 pcurve/face/ShapeFix 容差计算。
-        double midlineMaxGap = 1.2;
+        double midlineMaxGap = 0.9;
         // crossed-face 使用原支撑面重建时允许的最大候选边间距离。
         // 实际门槛还会至少覆盖两个候选 face 的已有 tolerance。
-        double crossedFaceOriginalSurfaceMaxGap = 1.2;
+        double crossedFaceOriginalSurfaceMaxGap = 0.8;
         // 普通策略的 pcurve 修复和校验容差下限；不降低原候选 edge 的已有 tolerance。
-        double pcurveTol = 2.2;
+        double pcurveTol = 0.5;
         // face 重建容差，用于新建 face 和局部 wire/face 修复。
-        double faceTol = 2.2;
+        double faceTol = 0.2;
         // face 容差上限。
-        double maxFaceTol = 2.2;
+        double maxFaceTol = 0.8;
         // crossed-face 原支撑面重建允许边界 edge 偏离支撑面的最大实测距离。
-        double maxBoundaryToSurfaceDeviation = 2.2;
+        double maxBoundaryToSurfaceDeviation = 0.9;
         // crossed-face 原支撑面重建允许边界 edge 达到的最大拓扑容差。
-        double maxRebuiltEdgeTolerance = 2.2;
+        double maxRebuiltEdgeTolerance = 0.9;
         // ShapeFix_Shape 的工作精度。
         double shapeFixPrecision = 1.0e-6;
         // ShapeFix_Shape 允许的最大容差。

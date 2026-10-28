@@ -37,6 +37,12 @@
 #include <TopTools_ListOfShape.hxx>
 
 namespace {
+constexpr int kDeleteAndFillDegree = 3;
+constexpr int kDeleteAndFillPointsOnCurve = 15;
+constexpr int kDeleteAndFillIterations = 2;
+constexpr int kDeleteAndFillMaxDegree = 6;
+constexpr int kDeleteAndFillMaxSegments = 16;
+
 bool isSameEdgeInVector(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge)
 {
     for (const TopoDS_Edge& existingEdge : edges) {
@@ -468,9 +474,9 @@ bool HealClosedNarrowGap::buildDeleteAndFillPatchFace(
     try {
         BRepFill_Filling filling;
         filling.SetResolParam(
-            params_.deleteAndFillDegree,
-            params_.deleteAndFillPointsOnCurve,
-            params_.deleteAndFillIterations,
+            kDeleteAndFillDegree,
+            kDeleteAndFillPointsOnCurve,
+            kDeleteAndFillIterations,
             Standard_False);
         filling.SetConstrParam(
             params_.deleteAndFillTolerance,
@@ -478,8 +484,8 @@ bool HealClosedNarrowGap::buildDeleteAndFillPatchFace(
             1.0e-2,
             1.0e-1);
         filling.SetApproxParam(
-            params_.deleteAndFillMaxDegree,
-            params_.deleteAndFillMaxSegments);
+            kDeleteAndFillMaxDegree,
+            kDeleteAndFillMaxSegments);
 
         // 直接以删除后留下的三维边界拟合新曲面，不使用旧 face 的 surface。
         for (const TopoDS_Edge& boundaryEdge : plan.boundary.edges) {
@@ -957,22 +963,20 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
                 locallyReplacedShape,
                 plan.boundary.edges));
 
-        if (params_.runShapeFixAfterRepair) {
-            ShapeFix_Shape fixer(trialShape);
-            const double fixPrecision = std::max(
-                Precision::Confusion(),
-                params_.deleteAndFillTolerance);
-            fixer.SetPrecision(fixPrecision);
-            fixer.SetMaxTolerance(std::max(
-                fixPrecision,
-                params_.deleteAndFillMaxG0Error));
-            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
-            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
-            fixer.Perform();
-            const TopoDS_Shape fixedShape = fixer.Shape();
-            if (!fixedShape.IsNull()) {
-                trialShape = fixedShape;
-            }
+        ShapeFix_Shape fixer(trialShape);
+        const double fixPrecision = std::max(
+            Precision::Confusion(),
+            params_.deleteAndFillTolerance);
+        fixer.SetPrecision(fixPrecision);
+        fixer.SetMaxTolerance(std::max(
+            fixPrecision,
+            params_.deleteAndFillMaxG0Error));
+        fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+        fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+        fixer.Perform();
+        const TopoDS_Shape fixedShape = fixer.Shape();
+        if (!fixedShape.IsNull()) {
+            trialShape = fixedShape;
         }
     }
     catch (const Standard_Failure& failure) {
@@ -983,9 +987,7 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
     }
 
     appendMessage(
-        std::string(params_.runShapeFixAfterRepair
-            ? "DeleteAndFill adjacency after final ShapeFix: "
-            : "DeleteAndFill adjacency before validation: ")
+        "DeleteAndFill adjacency after final ShapeFix: "
         + RepairDiagnostics::DescribeEdgeFaceCounts(trialShape, plan.boundary.edges));
 
     auto defectiveFaceWasRemoved = [&](const TopoDS_Shape& shape) {
@@ -1033,7 +1035,6 @@ bool HealClosedNarrowGap::tryRepairByDeletingAndFillingDefectiveFace(
     if (!validateDeleteAndFillResult(trialShape, validationError)) {
         std::string localValidationError;
         const bool canUseLocalResult =
-            params_.runShapeFixAfterRepair &&
             !locallyReplacedShape.IsNull() &&
             !trialShape.IsSame(locallyReplacedShape) &&
             defectiveFaceWasRemoved(locallyReplacedShape) &&

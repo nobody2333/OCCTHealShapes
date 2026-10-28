@@ -552,7 +552,7 @@ int main()
     if (localtime_s(&localTime, &currentTime) == 0) {
         std::cout << "start time: " << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
     }
-    std::string fileName = "./assets/h6k_cpl.stp";
+    std::string fileName = "./assets/dlr-f4.stp";
     //modelConvert(fileName);
 	//mergeShortEdge(fileName);
     //healNarrowGap(fileName);

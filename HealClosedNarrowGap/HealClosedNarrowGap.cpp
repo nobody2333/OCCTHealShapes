@@ -19,6 +19,13 @@
 
 namespace {
 constexpr int kMaxAutomaticRepairIterations = 300;
+constexpr int kFallbackWidthSampleCount = 20;
+constexpr int kMinWidthSampleCount = 20;
+constexpr int kMaxWidthSampleCount = 120;
+constexpr int kFallbackMidlineSampleCount = 20;
+constexpr int kMinMidlineSampleCount = 8;
+constexpr int kMaxMidlineSampleCount = 80;
+
 std::string formatIndexList(const std::vector<std::size_t>& indices)
 {
     std::ostringstream os;
@@ -41,29 +48,6 @@ HealClosedNarrowGap::HealClosedNarrowGap(const Params& params)
     params_.maxGapWidth = std::max(params_.maxGapWidth, Precision::Confusion());
     params_.minLengthRatio = GeometryUtils::Clamp01(params_.minLengthRatio);
     params_.minLengthWidthRatio = std::max(1.0, params_.minLengthWidthRatio);
-    if (!std::isfinite(params_.maxEndEdgeLengthFactor) ||
-        params_.maxEndEdgeLengthFactor <= Precision::Confusion()) {
-        params_.maxEndEdgeLengthFactor = 2.0;
-    }
-    if (!std::isfinite(params_.minAdjacentEdgeLengthRatio) ||
-        params_.minAdjacentEdgeLengthRatio < 1.0) {
-        params_.minAdjacentEdgeLengthRatio = 3.0;
-    }
-    params_.widthSampleCount = std::max(2, params_.widthSampleCount);
-    params_.minWidthSampleCount = std::max(2, params_.minWidthSampleCount);
-    params_.maxWidthSampleCount = std::max(
-        params_.minWidthSampleCount,
-        params_.maxWidthSampleCount);
-    if (!std::isfinite(params_.targetWidthSampleSpacing) ||
-        params_.targetWidthSampleSpacing <= Precision::Confusion()) {
-        params_.useAdaptiveWidthSampleCount = false;
-    }
-    params_.sampleCount = std::max(2, params_.sampleCount);
-    params_.minSampleCount = std::max(2, params_.minSampleCount);
-    params_.maxSampleCount = std::max(params_.minSampleCount, params_.maxSampleCount);
-    if (params_.targetSampleSpacing <= Precision::Confusion()) {
-        params_.useAdaptiveSampleCount = false;
-    }
     params_.midlineRepairTolerance = std::max(params_.midlineRepairTolerance, Precision::Confusion());
     params_.projectionVertexSnapTolerance = std::max(
         params_.projectionVertexSnapTolerance,
@@ -80,19 +64,6 @@ HealClosedNarrowGap::HealClosedNarrowGap(const Params& params)
     params_.deleteAndFillMaxG0Error = std::max(
         params_.deleteAndFillMaxG0Error,
         params_.deleteAndFillTolerance);
-    params_.deleteAndFillDegree = std::max(2, params_.deleteAndFillDegree);
-    params_.deleteAndFillPointsOnCurve = std::max(
-        2,
-        params_.deleteAndFillPointsOnCurve);
-    params_.deleteAndFillIterations = std::max(
-        1,
-        params_.deleteAndFillIterations);
-    params_.deleteAndFillMaxDegree = std::max(
-        params_.deleteAndFillDegree,
-        params_.deleteAndFillMaxDegree);
-    params_.deleteAndFillMaxSegments = std::max(
-        1,
-        params_.deleteAndFillMaxSegments);
 }
 
 void HealClosedNarrowGap::setInputShape(const TopoDS_Shape& shape)
@@ -129,26 +100,9 @@ int HealClosedNarrowGap::perform()
            << ", minLengthRatio=" << params_.minLengthRatio
            << ", minLengthWidthRatio=" << params_.minLengthWidthRatio
            << ", maxTipAngle=" << params_.maxTipAngle
-           << ", detectShortEdgeEnds="
-           << (params_.detectShortEdgeEnds ? "true" : "false")
-           << ", maxEndEdgeLengthFactor="
-           << params_.maxEndEdgeLengthFactor
-           << ", minAdjacentEdgeLengthRatio="
-           << params_.minAdjacentEdgeLengthRatio
-           << ", widthSampleCount=" << params_.widthSampleCount
-           << ", useAdaptiveWidthSampleCount="
-           << (params_.useAdaptiveWidthSampleCount ? "true" : "false")
-           << ", minWidthSampleCount=" << params_.minWidthSampleCount
-           << ", maxWidthSampleCount=" << params_.maxWidthSampleCount
            << ", targetWidthSampleSpacing="
            << params_.targetWidthSampleSpacing
-           << ", sampleCount=" << params_.sampleCount
-           << ", useAdaptiveSampleCount="
-           << (params_.useAdaptiveSampleCount ? "true" : "false")
-           << ", minSampleCount=" << params_.minSampleCount
-           << ", maxSampleCount=" << params_.maxSampleCount
            << ", targetSampleSpacing=" << params_.targetSampleSpacing
-           << ", useMidlineCollapse=" << (params_.useMidlineCollapse ? "true" : "false")
            << ", midlineConstructionMode="
            << midlineConstructionModeName(params_.midlineConstructionMode)
            << ", projectionVertexSnapTolerance="
@@ -159,20 +113,7 @@ int HealClosedNarrowGap::perform()
            << params_.deleteAndFillTolerance
            << ", deleteAndFillMaxG0Error="
            << params_.deleteAndFillMaxG0Error
-           << ", deleteAndFillDegree="
-           << params_.deleteAndFillDegree
-           << ", deleteAndFillPointsOnCurve="
-           << params_.deleteAndFillPointsOnCurve
-           << ", deleteAndFillIterations="
-           << params_.deleteAndFillIterations
-           << ", deleteAndFillMaxDegree="
-           << params_.deleteAndFillMaxDegree
-           << ", deleteAndFillMaxSegments="
-           << params_.deleteAndFillMaxSegments
-           << ", fallbackToSideReplacement=" << (params_.fallbackToSideReplacement ? "true" : "false")
-           << ", midlineRepairTolerance=" << params_.midlineRepairTolerance
-           << ", runShapeFixAfterRepair="
-           << (params_.runShapeFixAfterRepair ? "true" : "false");
+           << ", midlineRepairTolerance=" << params_.midlineRepairTolerance;
         appendMessage(os.str());
     }
 
@@ -308,106 +249,85 @@ bool HealClosedNarrowGap::tryRepairCandidate(
         return false;
     }
 
-    if (params_.useMidlineCollapse) {
-        std::string midlineError;
-        if (tryRepairByMidlineCollapse(currentShape, existingFailures, candidate, repairedShape, midlineError)) {
+    std::string midlineError;
+    if (tryRepairByMidlineCollapse(currentShape, existingFailures, candidate, repairedShape, midlineError)) {
+        return true;
+    }
+
+    std::string deleteAndFillError;
+    if (params_.useDeleteAndFillDefectiveFace) {
+        if (tryRepairByDeletingAndFillingDefectiveFace(
+                currentShape,
+                existingFailures,
+                candidate,
+                repairedShape,
+                deleteAndFillError)) {
+            appendMessage(
+                "Warning: repaired by DeleteAndFillDefectiveFace after earlier strategy failed:\n"
+                + RepairDiagnostics::IndentMultiline(
+                    RepairDiagnostics::StrategyFailureBlock(
+                        "MidlineCollapse",
+                        midlineError),
+                    "  "));
             return true;
         }
+    }
+    else {
+        deleteAndFillError = "strategy is disabled";
+    }
 
-        std::string deleteAndFillError;
-        if (params_.useDeleteAndFillDefectiveFace) {
-            if (tryRepairByDeletingAndFillingDefectiveFace(
-                    currentShape,
-                    existingFailures,
-                    candidate,
-                    repairedShape,
-                    deleteAndFillError)) {
-                appendMessage(
-                    "Warning: repaired by DeleteAndFillDefectiveFace after earlier strategy failed:\n"
-                    + RepairDiagnostics::IndentMultiline(
-                        RepairDiagnostics::StrategyFailureBlock(
-                            "MidlineCollapse",
-                            midlineError),
-                        "  "));
-                return true;
-            }
-        }
-        else {
-            deleteAndFillError = "strategy is disabled";
-        }
-
-        std::string sideError;
-        if (params_.fallbackToSideReplacement) {
-            const bool hasShortEdgeEnd =
-                candidate.startEnd.type == GapEndType::ShortEdge ||
-                candidate.finishEnd.type == GapEndType::ShortEdge;
-            const bool asymmetricSourceChains =
-                candidate.chainA.edges.size() != candidate.chainB.edges.size();
-            if (hasShortEdgeEnd) {
-                sideError =
-                    "candidate contains a short edge endpoint; "
-                    "side replacement cannot collapse and remove endpoint connector edges";
-            }
-            else if (asymmetricSourceChains) {
-                sideError =
-                    "candidate uses asymmetric source chains; "
-                    "midline collapse is disabled or failed; "
-                    "legacy side replacement only supports one-to-one source edge replacement";
-            }
-            else if (tryRepairBySideReplacement(
-                         currentShape,
-                         existingFailures,
-                         candidate,
-                         repairedShape,
-                         sideError)) {
-                appendMessage(
-                    "Warning: repaired by side replacement after earlier strategies failed:\n"
-                    + RepairDiagnostics::IndentMultiline(
-                        RepairDiagnostics::StrategyFailureBlock(
-                            "MidlineCollapse",
-                            midlineError),
-                        "  ")
-                    + "\n"
-                    + RepairDiagnostics::IndentMultiline(
-                        RepairDiagnostics::StrategyFailureBlock(
-                            "DeleteAndFillDefectiveFace",
-                            deleteAndFillError),
-                        "  "));
-                return true;
-            }
-        }
-        else {
-            sideError = "strategy is disabled";
-        }
-
-        errorMessage = "Closed narrow gap repair failed:\n"
+    std::string sideError;
+    const bool hasShortEdgeEnd =
+        candidate.startEnd.type == GapEndType::ShortEdge ||
+        candidate.finishEnd.type == GapEndType::ShortEdge;
+    const bool asymmetricSourceChains =
+        candidate.chainA.edges.size() != candidate.chainB.edges.size();
+    if (hasShortEdgeEnd) {
+        sideError =
+            "candidate contains a short edge endpoint; "
+            "side replacement cannot collapse and remove endpoint connector edges";
+    }
+    else if (asymmetricSourceChains) {
+        sideError =
+            "candidate uses asymmetric source chains; "
+            "midline collapse failed; "
+            "legacy side replacement only supports one-to-one source edge replacement";
+    }
+    else if (tryRepairBySideReplacement(
+                 currentShape,
+                 existingFailures,
+                 candidate,
+                 repairedShape,
+                 sideError)) {
+        appendMessage(
+            "Warning: repaired by side replacement after earlier strategies failed:\n"
             + RepairDiagnostics::IndentMultiline(
-                RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ")
+                RepairDiagnostics::StrategyFailureBlock(
+                    "MidlineCollapse",
+                    midlineError),
+                "  ")
             + "\n"
             + RepairDiagnostics::IndentMultiline(
                 RepairDiagnostics::StrategyFailureBlock(
                     "DeleteAndFillDefectiveFace",
                     deleteAndFillError),
-                "  ")
-            + "\n"
-            + RepairDiagnostics::IndentMultiline(
-                RepairDiagnostics::StrategyFailureBlock("SideReplacement", sideError), "  ");
-        return false;
+                "  "));
+        return true;
     }
 
-    if (candidate.startEnd.type == GapEndType::ShortEdge ||
-        candidate.finishEnd.type == GapEndType::ShortEdge) {
-        errorMessage =
-            "candidate contains a short edge endpoint; "
-            "midline collapse is required to remove endpoint connector edges";
-        return false;
-    }
-    return tryRepairBySideReplacement(
-        currentShape,
-        existingFailures,
-        candidate,
-        repairedShape,
-        errorMessage);
+    errorMessage = "Closed narrow gap repair failed:\n"
+        + RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::StrategyFailureBlock("MidlineCollapse", midlineError), "  ")
+        + "\n"
+        + RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::StrategyFailureBlock(
+                "DeleteAndFillDefectiveFace",
+                deleteAndFillError),
+            "  ")
+        + "\n"
+        + RepairDiagnostics::IndentMultiline(
+            RepairDiagnostics::StrategyFailureBlock("SideReplacement", sideError), "  ");
+    return false;
 }
 
 bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
@@ -533,30 +453,26 @@ bool HealClosedNarrowGap::tryRepairByMidlineCollapse(
         "Midline adjacency after local rebuild: "
         + RepairDiagnostics::DescribeEdgeFaceCounts(trialShape, midlineData.chain.edges));
 
-    if (params_.runShapeFixAfterRepair) {
-        try {
-            ShapeFix_Shape fixer(trialShape);
-            fixer.SetPrecision(params_.midlineRepairTolerance);
-            fixer.SetMaxTolerance(std::max(params_.midlineRepairTolerance, params_.maxGapWidth));
-            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
-            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
-            fixer.Perform();
+    try {
+        ShapeFix_Shape fixer(trialShape);
+        fixer.SetPrecision(params_.midlineRepairTolerance);
+        fixer.SetMaxTolerance(std::max(params_.midlineRepairTolerance, params_.maxGapWidth));
+        fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+        fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+        fixer.Perform();
 
-            const TopoDS_Shape fixedShape = fixer.Shape();
-            if (!fixedShape.IsNull()) {
-                trialShape = fixedShape;
-            }
+        const TopoDS_Shape fixedShape = fixer.Shape();
+        if (!fixedShape.IsNull()) {
+            trialShape = fixedShape;
         }
-        catch (Standard_Failure& failure) {
-            errorMessage = "ShapeFix_Shape failed after midline collapse: " + RepairDiagnostics::FailureText(failure);
-            return false;
-        }
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "ShapeFix_Shape failed after midline collapse: " + RepairDiagnostics::FailureText(failure);
+        return false;
     }
 
     appendMessage(
-        std::string(params_.runShapeFixAfterRepair
-            ? "Midline adjacency after final ShapeFix: "
-            : "Midline adjacency before validation (final ShapeFix disabled): ")
+        "Midline adjacency after final ShapeFix: "
         + RepairDiagnostics::DescribeEdgeFaceCounts(trialShape, midlineData.chain.edges));
 
     std::vector<TopoDS_Edge> removedEndpointEdges;
@@ -610,7 +526,7 @@ bool HealClosedNarrowGap::tryRepairBySideReplacement(
     if (choice.keptChain.edges.size() != choice.replaceChain.edges.size()) {
         errorMessage =
             "candidate uses asymmetric source chains; "
-            "midline collapse is disabled or failed; "
+            "midline collapse failed; "
             "legacy side replacement only supports one-to-one source edge replacement";
         return false;
     }
@@ -626,24 +542,22 @@ bool HealClosedNarrowGap::tryRepairBySideReplacement(
         return false;
     }
 
-    if (params_.runShapeFixAfterRepair) {
-        try {
-            ShapeFix_Shape fixer(trialShape);
-            fixer.SetPrecision(std::max(Precision::Confusion(), params_.maxGapWidth));
-            fixer.SetMaxTolerance(std::max(Precision::Confusion(), params_.maxGapWidth * 10.0));
-            fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
-            fixer.FixFaceTool()->FixMissingSeamMode() = 1;
-            fixer.Perform();
+    try {
+        ShapeFix_Shape fixer(trialShape);
+        fixer.SetPrecision(std::max(Precision::Confusion(), params_.maxGapWidth));
+        fixer.SetMaxTolerance(std::max(Precision::Confusion(), params_.maxGapWidth * 10.0));
+        fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
+        fixer.FixFaceTool()->FixMissingSeamMode() = 1;
+        fixer.Perform();
 
-            const TopoDS_Shape fixedShape = fixer.Shape();
-            if (!fixedShape.IsNull()) {
-                trialShape = fixedShape;
-            }
+        const TopoDS_Shape fixedShape = fixer.Shape();
+        if (!fixedShape.IsNull()) {
+            trialShape = fixedShape;
         }
-        catch (Standard_Failure& failure) {
-            errorMessage = "ShapeFix_Shape failed after closed gap repair: " + RepairDiagnostics::FailureText(failure);
-            return false;
-        }
+    }
+    catch (Standard_Failure& failure) {
+        errorMessage = "ShapeFix_Shape failed after closed gap repair: " + RepairDiagnostics::FailureText(failure);
+        return false;
     }
 
     if (!validateRepairResult(
@@ -673,14 +587,7 @@ HealClosedNarrowGap::ChainChoice HealClosedNarrowGap::chooseChainToKeep(
     const ClosedGapCandidate& candidate) const
 {
     ChainChoice choice;
-    bool keepA = true;
-
-    if (params_.preferLongerChainToKeep) {
-        keepA = candidate.chainA.length >= candidate.chainB.length;
-    }
-    else if (candidate.chainA.edges.size() != candidate.chainB.edges.size()) {
-        keepA = candidate.chainA.edges.size() <= candidate.chainB.edges.size();
-    }
+    const bool keepA = candidate.chainA.length >= candidate.chainB.length;
 
     if (keepA) {
         choice.keptChain = candidate.chainA;
@@ -746,14 +653,14 @@ bool HealClosedNarrowGap::validateRepairResult(
             existingFailures,
             repairedFailures);
 
-    if (!newFailures.empty() && params_.rejectInvalidResult) {
+    if (!newFailures.empty()) {
         errorMessage = "new BRepCheck failures after closed narrow gap repair:"
             + RepairDiagnostics::DescribeBRepCheckFailures(newFailures);
         return false;
     }
 
     const int freeEdgesAfter = TopologyUtils::CountFreeEdges(afterShape);
-    if (freeEdgesAfter > freeEdgesBefore && params_.rejectFreeEdgeIncrease) {
+    if (freeEdgesAfter > freeEdgesBefore) {
         std::ostringstream os;
         os << "free edge count increased after closed narrow gap repair: before="
            << freeEdgesBefore << ", after=" << freeEdgesAfter;
@@ -815,29 +722,27 @@ int HealClosedNarrowGap::computeWidthSampleCount(
     double lengthA,
     double lengthB) const
 {
-    const int fallbackCount = std::max(2, params_.widthSampleCount);
-    if (!params_.useAdaptiveWidthSampleCount ||
-        !std::isfinite(params_.targetWidthSampleSpacing) ||
+    if (!std::isfinite(params_.targetWidthSampleSpacing) ||
         params_.targetWidthSampleSpacing <= Precision::Confusion()) {
-        return fallbackCount;
+        return kFallbackWidthSampleCount;
     }
 
     if (!std::isfinite(lengthA) ||
         !std::isfinite(lengthB) ||
         lengthA <= Precision::Confusion() ||
         lengthB <= Precision::Confusion()) {
-        return fallbackCount;
+        return kFallbackWidthSampleCount;
     }
 
     const double pairLength = std::max(lengthA, lengthB);
     const double countByLength =
         std::ceil(pairLength / params_.targetWidthSampleSpacing) + 1.0;
     if (!std::isfinite(countByLength) ||
-        countByLength >= static_cast<double>(params_.maxWidthSampleCount)) {
-        return params_.maxWidthSampleCount;
+        countByLength >= static_cast<double>(kMaxWidthSampleCount)) {
+        return kMaxWidthSampleCount;
     }
-    if (countByLength <= static_cast<double>(params_.minWidthSampleCount)) {
-        return params_.minWidthSampleCount;
+    if (countByLength <= static_cast<double>(kMinWidthSampleCount)) {
+        return kMinWidthSampleCount;
     }
 
     return static_cast<int>(countByLength);
@@ -845,23 +750,28 @@ int HealClosedNarrowGap::computeWidthSampleCount(
 
 int HealClosedNarrowGap::computeMidlineSampleCount(double lengthA, double lengthB) const
 {
-    const int fallbackCount = std::max(2, params_.sampleCount);
-    if (!params_.useAdaptiveSampleCount ||
+    if (!std::isfinite(params_.targetSampleSpacing) ||
         params_.targetSampleSpacing <= Precision::Confusion()) {
-        return fallbackCount;
+        return kFallbackMidlineSampleCount;
     }
 
     const double pairLength = std::max(lengthA, lengthB);
-    if (!std::isfinite(pairLength) || pairLength <= Precision::Confusion()) {
-        return fallbackCount;
+    if (!std::isfinite(lengthA) || !std::isfinite(lengthB) ||
+        pairLength <= Precision::Confusion()) {
+        return kFallbackMidlineSampleCount;
     }
 
     // 加一是为了让采样序列同时包含 source edge 的两个端点。
-    const int countByLength = static_cast<int>(std::ceil(
-        pairLength / params_.targetSampleSpacing)) + 1;
-    return std::max(
-        params_.minSampleCount,
-        std::min(params_.maxSampleCount, countByLength));
+    const double countByLength =
+        std::ceil(pairLength / params_.targetSampleSpacing) + 1.0;
+    if (!std::isfinite(countByLength) ||
+        countByLength >= static_cast<double>(kMaxMidlineSampleCount)) {
+        return kMaxMidlineSampleCount;
+    }
+    if (countByLength <= static_cast<double>(kMinMidlineSampleCount)) {
+        return kMinMidlineSampleCount;
+    }
+    return static_cast<int>(countByLength);
 }
 
 int HealClosedNarrowGap::findSameEdgeIndex(

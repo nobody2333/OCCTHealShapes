@@ -28,41 +28,19 @@ public:
 
     struct Params {
         // 两侧 chain 采样点之间允许的最大宽度。
-        double maxGapWidth = 0.1;
+        double maxGapWidth = 0.8;
         // 候选两侧 chain 长度相似度下限：min(lengthA, lengthB) / max(lengthA, lengthB)。
         double minLengthRatio = 0.6;
         // 候选细缝的最小长宽比；值越大越偏向狭长细缝。
         double minLengthWidthRatio = 5.0;
         // 识别细缝端部尖点时允许的最大夹角。
         double maxTipAngle = 35.0 * 3.14159265358979323846 / 180.0;
-        // 是否识别由短 edge 连接两侧 chain 的非尖点端部。
-        bool detectShortEdgeEnds = true;
-        // 短端边最大长度相对于 maxGapWidth 的倍数。
-        double maxEndEdgeLengthFactor = 2.0;
-        // 短端边两侧相邻 edge 相对于短端边的最小长度倍数。
-        double minAdjacentEdgeLengthRatio = 3.0;
-        // 关闭宽度自适应采样或参数无效时，每侧使用的固定宽度采样点数。
-        int widthSampleCount = 20;
-        // 是否根据两侧 chain 的较长长度自适应计算宽度检测采样点数。
-        bool useAdaptiveWidthSampleCount = true;
-        // 宽度检测的最小采样点数；默认不低于旧版固定采样密度。
-        int minWidthSampleCount = 20;
-        // 宽度检测的最大采样点数，限制双向投影的性能开销。
-        int maxWidthSampleCount = 120;
         // 宽度检测的目标采样间距，单位与模型单位一致。
+        // 内部自适应取 20～120 点；间距或长度无效时回退到 20 点。
         double targetWidthSampleSpacing = 0.5;
-        // 关闭中线自适应采样或参数无效时，中线曲线拟合使用的固定采样点数。
-        int sampleCount = 20;
-        // 是否根据每对 source edge 的长度自适应计算中线曲线采样点数。
-        bool useAdaptiveSampleCount = true;
-        // 中线曲线拟合使用的最小采样点数，至少包含两个端点。
-        int minSampleCount = 8;
-        // 中线曲线拟合使用的最大采样点数，防止长 edge 导致计算量过大。
-        int maxSampleCount = 80;
         // 中线曲线的目标采样间距，单位与模型单位一致。
+        // 内部自适应取 8～80 点；间距或长度无效时回退到 20 点。
         double targetSampleSpacing = 1.0;
-        // 为 true 时，优先用两侧采样点中线构造新 edge chain，同时替换两侧 chain。
-        bool useMidlineCollapse = true;
         // 中线构造模式；投影对应模式也可以显式用于拓扑分段对称的候选。
         MidlineConstructionMode midlineConstructionMode =
             MidlineConstructionMode::Auto;
@@ -74,30 +52,8 @@ public:
         double deleteAndFillTolerance = 1.0e-3;
         // DeleteAndFillDefectiveFace 允许的最大边界 G0 偏差。
         double deleteAndFillMaxG0Error = 1.0e-1;
-        // BRepFill_Filling 的初始曲面次数。
-        int deleteAndFillDegree = 3;
-        // 每条边界曲线参与拟合的离散点数。
-        int deleteAndFillPointsOnCurve = 15;
-        // BRepFill_Filling 的迭代次数。
-        int deleteAndFillIterations = 2;
-        // 限制补面 B-spline 的最高次数，避免生成过度复杂的曲面。
-        int deleteAndFillMaxDegree = 6;
-        // 限制补面 B-spline 的最大分段数。
-        int deleteAndFillMaxSegments = 16;
-        // 中线收缩失败时，是否回退到“一侧 chain 替换另一侧 chain”的保守方案。
-        bool fallbackToSideReplacement = true;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
-        double midlineRepairTolerance = 0.1;
-        // 为 true 时优先保留总长度较长的 chain；否则优先保留 edge 数更少的 chain。
-        bool preferLongerChainToKeep = true;
-        // 为 true 时，替换后运行 ShapeFix_Shape 做整体后处理。
-        bool runShapeFixAfterRepair = true;
-        // 为 true 时，如果 free edge 数量增加，则拒绝本次修复。
-        bool rejectFreeEdgeIncrease = true;
-        // 为 true 时，如果 BRepCheck 出现新问题，则拒绝本次修复。
-        bool rejectInvalidResult = true;
-        // 调试开关；当前关键过程始终写入 messages_。
-        bool verbose = false;
+        double midlineRepairTolerance = 0.8;
     };
 
     explicit HealClosedNarrowGap(const Params& params = Params());
@@ -507,7 +463,7 @@ private:
         std::string& errorMessage) const;
 
     int computeAutomaticIterationLimit(const TopoDS_Shape& shape) const;
-    // 根据两侧 chain 长度计算宽度检测采样数；关闭自适应时返回 widthSampleCount。
+    // 根据两侧 chain 长度自适应取 20～120 点；间距或长度无效时回退到 20 点。
     int computeWidthSampleCount(double lengthA, double lengthB) const;
     int computeMidlineSampleCount(double lengthA, double lengthB) const;
     int findSameEdgeIndex(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge) const;
