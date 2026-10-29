@@ -27,7 +27,7 @@ public:
     };
 
     struct Params {
-        // 两侧 chain 采样点之间允许的最大宽度。
+        // 两侧 chain 之间允许的最大宽度。
         double maxGapWidth = 0.8;
         // 候选两侧 chain 长度相似度下限：min(lengthA, lengthB) / max(lengthA, lengthB)。
         double minLengthRatio = 0.6;
@@ -53,7 +53,7 @@ public:
         // DeleteAndFillDefectiveFace 允许的最大边界 G0 偏差。
         double deleteAndFillMaxG0Error = 1.0e-1;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
-        double midlineRepairTolerance = 0.8;
+        double midlineRepairTolerance = 0.1;
     };
 
     explicit HealClosedNarrowGap(const Params& params = Params());

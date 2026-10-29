@@ -205,11 +205,12 @@ std::string describeBRepCheckFailureList(const std::vector<BRepCheckFailureInfo>
 }
 } // namespace
 
-SewShells::Params SewShells::ConservativeParams(double tolerance)
+SewShells::Params SewShells::ConservativeParams(double tolerance, double maxTolerance)
 {
     Params params;
     params.conservative = true;
     params.sewingTolerance = tolerance;
+    params.maxTolerance = maxTolerance;
     return params;
 }
 
@@ -218,14 +219,14 @@ SewShells::SewShells(const Params& params)
 {
     if (!std::isfinite(params_.sewingTolerance)) params_.sewingTolerance = 1.0e-4;
     if (!std::isfinite(params_.minTolerance)) params_.minTolerance = Precision::Confusion();
-    if (!std::isfinite(params_.maxTolerance)) params_.maxTolerance = params_.sewingTolerance;
+    if (!std::isfinite(params_.maxTolerance)) params_.maxTolerance = Params().maxTolerance;
     params_.sewingTolerance = std::max(params_.sewingTolerance, Precision::Confusion());
     params_.minTolerance = std::max(params_.minTolerance, Precision::Confusion());
-    params_.maxTolerance = std::max(params_.maxTolerance, params_.sewingTolerance);
+    params_.maxTolerance = std::max(params_.maxTolerance, Precision::Confusion());
     params_.minShellCountPerGroup = std::max(2, params_.minShellCountPerGroup);
-    params_.minTolerance = std::min(params_.minTolerance, params_.sewingTolerance);
+    params_.minTolerance = std::min({
+        params_.minTolerance, params_.sewingTolerance, params_.maxTolerance });
     if (params_.conservative) {
-        params_.maxTolerance = params_.sewingTolerance;
         params_.minTolerance = Precision::Confusion();
         params_.localTolerancesMode = false;
         params_.nonManifoldMode = false;
@@ -1037,9 +1038,9 @@ bool SewShells::applyShapeFixAfterSewing(
 
     try {
         ShapeFix_Shape fixer(shape);
-        const double precision = std::max(Precision::Confusion(), params_.sewingTolerance);
+        const double precision = std::min(params_.sewingTolerance, params_.maxTolerance);
         fixer.SetPrecision(precision);
-        fixer.SetMaxTolerance(std::max({ precision, params_.maxTolerance }));
+        fixer.SetMaxTolerance(params_.maxTolerance);
         fixer.FixWireTool()->FixEdgeCurvesMode() = 1;
         fixer.FixFaceTool()->FixMissingSeamMode() = 1;
         fixer.Perform();

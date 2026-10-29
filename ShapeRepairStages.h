@@ -18,6 +18,9 @@ namespace ShapeRepairStages
     ShapeRepairPipeline::Stage MakeConservativeSewShellsStage(
         double tolerance = 1.0e-4, bool enabled = true);
 
+    ShapeRepairPipeline::Stage MakeConservativeSewShellsStage(
+        double tolerance, double maxTolerance, bool enabled);
+
     ShapeRepairPipeline::Stage MakeHealNarrowGapStage(
         const HealNarrowGap::Params& params = HealNarrowGap::Params(),
         bool enabled = true);

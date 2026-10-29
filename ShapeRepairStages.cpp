@@ -22,11 +22,17 @@ ShapeRepairPipeline::Stage ShapeRepairStages::MakeShapePreProcessStage(
 ShapeRepairPipeline::Stage ShapeRepairStages::MakeConservativeSewShellsStage(
     double tolerance, bool enabled)
 {
+    return MakeConservativeSewShellsStage(tolerance, SewShells::Params().maxTolerance, enabled);
+}
+
+ShapeRepairPipeline::Stage ShapeRepairStages::MakeConservativeSewShellsStage(
+    double tolerance, double maxTolerance, bool enabled)
+{
     ShapeRepairPipeline::Stage stage;
     stage.name = "ConservativeSewShells";
     stage.enabled = enabled;
-    stage.execute = [tolerance](const TopoDS_Shape& inputShape) {
-        SewShells sewer(SewShells::ConservativeParams(tolerance));
+    stage.execute = [tolerance, maxTolerance](const TopoDS_Shape& inputShape) {
+        SewShells sewer(SewShells::ConservativeParams(tolerance, maxTolerance));
         ShapeRepairPipeline::StageExecutionResult result;
         result.repairCount = sewer.perform(inputShape);
         result.resultShape = sewer.getResultShape();

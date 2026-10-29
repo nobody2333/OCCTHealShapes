@@ -1457,8 +1457,11 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
     auto report = [&](const ShapeRepairPipeline::Result& result) {
         for (const auto& stage : result.stageReports) {
             log << "[Stage " << stage.name << "] accepted=" << stage.accepted
-                << ", modified=" << stage.modified << ", repairCount=" << stage.repairCount
-                << ", rejection reason=" << stage.rejectionReason << '\n';
+                << ", modified=" << stage.modified << ", repairCount=" << stage.repairCount;
+            if (!stage.rejectionReason.empty()) {
+                log << ", rejection reason=" << stage.rejectionReason;
+            }
+            log << '\n';
             for (const auto& message : stage.messages) log << message << '\n';
         }
         for (const auto& message : result.messages) log << message << '\n';
@@ -1491,7 +1494,10 @@ int ApplicationInit::runGroupedRepairPipelineAndExport(
         builder.Add(combined, accepted);
     }
     ShapeRepairPipeline rounds;
-    rounds.addStage(ShapeRepairStages::MakeConservativeSewShellsStage(0.26, true));
+    const double sewingTolerance = 0.26;
+    const double maxTolerance = 0.5;
+    rounds.addStage(ShapeRepairStages::MakeConservativeSewShellsStage(
+        sewingTolerance, maxTolerance, true));
 
     TopoDS_Shape working = combined;
     for (int round = 1; round <= 1; ++round) {

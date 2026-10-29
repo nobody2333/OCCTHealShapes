@@ -18,7 +18,8 @@ public:
         double sewingTolerance = 1.0e-4;
         // sewing 允许使用的最小局部容差。
         double minTolerance = 1.0e-7;
-        // sewing 允许使用的最大局部容差，避免容差被异常放大。
+        // 独立的最大局部容差，也用于保守模式的边/顶点输出容差检查。
+        // 不随 sewingTolerance 自动调整；面的输出检查使用对应输入面的容差。
         double maxTolerance = 1.0e-2;
         // 同一父 compound 下至少有多少个直接 shell 子节点时才执行 sewing。
         int minShellCountPerGroup = 2;
@@ -50,8 +51,9 @@ public:
 
     explicit SewShells(const Params& params = Params());
 
-    // tolerance 使用模型单位，独立于细缝宽度参数。
-    static Params ConservativeParams(double tolerance = 1.0e-4);
+    // 两个容差均使用模型单位，分别设置匹配容差和最大容差。
+    static Params ConservativeParams(
+        double tolerance = 1.0e-4, double maxTolerance = Params().maxTolerance);
 
     // 设置输入 shape，并清空上一轮执行状态。
     void setInputShape(const TopoDS_Shape& shape);
