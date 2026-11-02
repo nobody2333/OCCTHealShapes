@@ -1,4 +1,4 @@
-#include "HealClosedNarrowGap.h"
+﻿#include "HealClosedNarrowGap.h"
 #include "RepairDiagnostics.h"
 
 #include "GeometryUtils.h"
@@ -27,8 +27,8 @@
 #include <TopTools_ListOfShape.hxx>
 
 namespace {
-constexpr double kMaxEndEdgeLengthFactor = 2.0;
-constexpr double kMinAdjacentEdgeLengthRatio = 3.0;
+constexpr double kMaxEndEdgeLengthFactor = 1.0;
+constexpr double kMinAdjacentEdgeLengthRatio = 50.0;
 
 TopoDS_Face firstFaceInList(const TopTools_ListOfShape& shapes)
 {

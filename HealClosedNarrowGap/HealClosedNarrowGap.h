@@ -53,7 +53,7 @@ public:
         // DeleteAndFillDefectiveFace 允许的最大边界 G0 偏差。
         double deleteAndFillMaxG0Error = 1.0e-1;
         // 中线构造、face 重建及最终 ShapeFix_Shape 使用的修复容差。
-        double midlineRepairTolerance = 0.1;
+        double midlineRepairTolerance = 0.8;
     };
 
     explicit HealClosedNarrowGap(const Params& params = Params());
